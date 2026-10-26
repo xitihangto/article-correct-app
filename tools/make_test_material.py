@@ -1,10 +1,12 @@
 # -*- coding: utf-8 -*-
 """生成端到端测试素材：题目 + 学生作文（故意带错）。
-用法：Runtime/python/bin/python3.12 tools/make_test_material.py
+用法：Runtime/python/bin/python3.12 tools/make_test_material.py      # 生成第 1、2 套
+      Runtime/python/bin/python3.12 tools/make_test_material.py 3    # 只生成第 3 套
 产物：~/Documents/作文批改测试/
-  第1套（投稿，AI 与作业）、第2套（书信，生活场景）
+  第1套（投稿，AI 与作业）、第2套（书信，生活场景）、第3套（演讲稿，英语文化周）
 """
 import os
+import sys
 from docx import Document
 from docx.shared import Pt, Cm
 from docx.enum.text import WD_ALIGN_PARAGRAPH
@@ -70,6 +72,41 @@ S2_ESSAY = [
 ]
 
 
+# ---------------- 第 3 套：演讲稿（英语文化周开幕式） ----------------
+S3_TOPIC = [
+    "IV. Guided Writing (25%)",
+    "Directions: Write an English composition in 120-150 words according to the instructions "
+    "given below in Chinese.",
+    "假如你是明启中学高三学生李华。下周学校将举办“英语文化周”，开幕式上你作为学生代表"
+    "用英语发言。请写一篇发言稿，内容须包括：",
+    "1. 你对英语学习意义的理解",
+    "2. 你推荐的一项活动及理由",
+    "3. 对同学们的倡议",
+]
+# 故意埋的错（14 处，方便批改稿有活干）：
+#  has learn→learned  which connect→connects  first time go→the first time I went
+#  too nervous that→so  made me confidence→confident  I become→became
+#  a English→an  many activity→activities  I strong recommend→strongly
+#  Because 从句单独成句  no matter you are→whether  oportunity→opportunity
+#  looking forward to see→seeing  Thank you for your listening→Thanks for listening
+S3_ESSAY = [
+    "Good morning, everyone! I'm Li Hua from Class Three, Grade Three. It's my great honor "
+    "to speak here.",
+    "As a student who has learn English for six years, I want to share my understanding of it. "
+    "English is not only a tool of communication, but also a bridge which connect different "
+    "cultures.",
+    "I still remember when I first time go to the English corner, I was too nervous that I "
+    "couldn't say a word. A teacher encouraged me, and it made me confidence. From then on, "
+    "I become more and more interested in English.",
+    "This week our school will hold a English culture week. There are many activity waiting for "
+    "you. I strong recommend the singing contest, because you can not only practise your spoken "
+    "English, but also make friends. Besides, it is a good oportunity to show your talent, no "
+    "matter you are good at singing or not.",
+    "Let's take part in them actively. I'm looking forward to see you there. Thank you for your "
+    "listening!",
+]
+
+
 def new_doc():
     doc = Document()
     sec = doc.sections[0]
@@ -95,22 +132,35 @@ def add(doc, text, indent=True, size=12, align=WD_ALIGN_PARAGRAPH.JUSTIFY):
     return p
 
 
-def build(topic, essay, topic_name, essay_name):
+def build(topic, essay, topic_name, essay_name, signature=True):
     d = new_doc()
     for i, t in enumerate(topic):
         add(d, t, indent=(i >= 2))
     d.save(os.path.join(OUT_DIR, topic_name))
 
     d = new_doc()
-    for t in essay[:-1]:
-        add(d, t)
-    # 最后一段是署名，右对齐不缩进
-    add(d, essay[-1], indent=False, align=WD_ALIGN_PARAGRAPH.RIGHT)
+    if signature:
+        for t in essay[:-1]:
+            add(d, t)
+        # 最后一段是署名，右对齐不缩进
+        add(d, essay[-1], indent=False, align=WD_ALIGN_PARAGRAPH.RIGHT)
+    else:
+        # 演讲稿没有署名，整篇都是正文
+        for t in essay:
+            add(d, t)
     d.save(os.path.join(OUT_DIR, essay_name))
 
     print(f"{topic_name:28s} {essay_name:28s} 正文 {sum(len(t.split()) for t in essay)} 词")
 
 
-build(S1_TOPIC, S1_ESSAY, "第1套-题目.docx", "第1套-学生作文.docx")
-build(S2_TOPIC, S2_ESSAY, "第2套-题目.docx", "第2套-学生作文.docx")
+# 无参数生成第 1、2 套（保持原行为）；带数字参数只生成那一套，免得覆盖已有素材
+# —— 第 2 套的 docx 里后来插过图片，重跑会把它冲掉。
+want = sys.argv[1] if len(sys.argv) > 1 else "all"
+
+if want in ("all", "1"):
+    build(S1_TOPIC, S1_ESSAY, "第1套-题目.docx", "第1套-学生作文.docx")
+if want in ("all", "2"):
+    build(S2_TOPIC, S2_ESSAY, "第2套-题目.docx", "第2套-学生作文.docx")
+if want in ("all", "3"):
+    build(S3_TOPIC, S3_ESSAY, "第3套-题目.docx", "第3套-学生作文.docx", signature=False)
 print("目录:", OUT_DIR)

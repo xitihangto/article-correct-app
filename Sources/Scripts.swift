@@ -66,20 +66,10 @@ enum Scripts {
 
     // MARK: - v0.2 上传与发送
 
-    /// 点「开启新对话」，清掉上一轮残留的附件
-    static let newChat = #"""
-    (function(){
-      var els=document.querySelectorAll('button,a,[role=button]');
-      for(var i=0;i<els.length;i++){
-        var t=(els[i].innerText||'').replace(/\s+/g,'').trim();
-        if(/^(开启新对话|新对话|新建对话|New chat)$/i.test(t)){
-          els[i].click();
-          return 'CLICKED:'+t;
-        }
-      }
-      return 'NOT_FOUND';
-    })()
-    """#
+    // 这里原本有个 `newChat`（点页面上的「开启新对话」按钮）。
+    // v0.12~v0.20 实测一次都没点中过（DOM 里找不到可匹配的按钮，加 aria-label 兜底也没用），
+    // 每次都靠重载根地址兜底。既然从来没生效，就别留着骗人：新对话统一走
+    // `BrowserController.loadDeepSeek(force: true)` 重载根地址，见 Pipeline 第 0 步。
 
     /// 探测输入区结构，同时检查「深度思考」和「智能搜索」是否都已激活。
     ///
@@ -180,9 +170,12 @@ enum Scripts {
           }
           var input=document.querySelector('input[type=file]');
           if(input){
+            var want=dt.files.length;
             input.files=dt.files;
             input.dispatchEvent(new Event('change',{bubbles:true}));
-            return 'INPUT:'+input.files.length;
+            // 网页处理完 change 通常会把 input.value 清空（files 跟着变 0），
+            // 所以返回「交给它的个数 / 事件处理完还剩几个」。只看后一个数会误以为注入失败。
+            return 'INPUT:'+want+'/'+input.files.length;
           }
           var ta=document.querySelector('textarea');
           var zone=(ta&&(ta.closest('form')||ta.parentElement))||document.body;
@@ -195,17 +188,29 @@ enum Scripts {
         """#
     }
 
-    /// 检查哪些文件名还没出现在页面上
-    static func checkNames(namesJSON: String) -> String {
+    /// 检查哪些附件还没出现在页面上。
+    /// 入参是 `[{n:"文件名", i:1}]`，`i=1` 表示图片。
+    /// 文字类附件按文件名在 innerText 里找；**图片另有一条兜底**：有的附件条只显示缩略图、
+    /// 不显示文件名，这时用「页面上的 blob/data 缩略图数量」来判断，免得明明传上去了却报失败。
+    static func checkNames(filesJSON: String) -> String {
         #"""
-        (function(names){
+        (function(files){
           var txt=document.body.innerText;
-          var missing=[];
-          for(var i=0;i<names.length;i++){
-            if(txt.indexOf(names[i])<0){missing.push(names[i]);}
+          var imgs=document.querySelectorAll('img[src^="blob:"], img[src^="data:image"]').length;
+          var missing=[], needImg=0;
+          for(var i=0;i<files.length;i++){
+            var f=files[i];
+            if(txt.indexOf(f.n)>=0){continue;}
+            if(f.i===1){needImg++;}else{missing.push(f.n);}
           }
-          return JSON.stringify({missing:missing});
-        })(\#(namesJSON))
+          // 名字找不到的图片，只要缩略图数量够就认它到齐了
+          if(needImg>0&&imgs<needImg){
+            for(var j=0;j<files.length;j++){
+              if(files[j].i===1&&txt.indexOf(files[j].n)<0){missing.push(files[j].n);}
+            }
+          }
+          return JSON.stringify({missing:missing, imgs:imgs});
+        })(\#(filesJSON))
         """#
     }
 
@@ -224,6 +229,27 @@ enum Scripts {
         })(\#(textJSON))
         """#
     }
+
+    /// 清空输入框（同样走 React 的 native setter，否则状态不更新）
+    static let clearText = #"""
+    (function(){
+      var ta=document.querySelector('textarea');
+      if(!ta){return 'NO_TEXTAREA';}
+      var setter=Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype,'value').set;
+      setter.call(ta,'');
+      ta.dispatchEvent(new Event('input',{bubbles:true}));
+      ta.dispatchEvent(new Event('change',{bubbles:true}));
+      return 'OK:'+ta.value.length;
+    })()
+    """#
+
+    /// 回读输入框里的文字，用来校验填进去的提示词有没有被网页追加别的内容
+    static let readText = #"""
+    (function(){
+      var ta=document.querySelector('textarea');
+      return ta?ta.value:'__NO_TEXTAREA__';
+    })()
+    """#
 
     /// 点发送
     static let sendNow = #"""

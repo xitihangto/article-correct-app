@@ -44,7 +44,7 @@ struct ProgressInfo: Equatable {
     enum Tone { case idle, ok, error }
 
     var title: String = "等待上传文档"
-    var detail: String = "请上传作文题目与学生作文两份 Word 文档，两份齐备后即可开始批改。"
+    var detail: String = "请上传作文题目与学生作文，Word、PDF 或图片均可；两份齐备后即可开始批改。"
     /// 0 表示进度不确定（用滚动条动画），0~1 之间才是确定的百分比
     var fraction: Double = 0
     var running: Bool = false
@@ -71,22 +71,155 @@ enum DocxState: Equatable {
     var url: URL? { if case .ready(let u) = self { return u }; return nil }
 }
 
+/// 上传框里的一张预览卡片（v0.18 界面改版引入）。
+/// 一个框里可以放「若干个文档」或「若干张图片」，但不能混放，
+/// 数量上限见 `AppState.limits(for:)`。
+struct UploadItem: Identifiable, Equatable {
+    enum Kind { case document, image }
+
+    /// 只收这几种。pdf 是文档、png/jpg 是图片，其余一律拒绝。
+    static let allowedExtensions: Set<String> = ["doc", "docx", "pdf", "png", "jpg", "jpeg"]
+    private static let imageExtensions: Set<String> = ["png", "jpg", "jpeg"]
+
+    let id = UUID()
+    /// 文档 / 磁盘上的图片都有 URL；从剪贴板来的内存图片没有，落盘留到接流水线那一步做
+    var url: URL?
+    var kind: Kind
+    var name: String
+    var sizeKB: Int
+    /// 图片的缩略图；文档为 nil，卡片里画一个 SF Symbol
+    var thumb: NSImage?
+    /// 是不是「从剪贴板粘进来的图片」。命名序号只数这个，上传的文件不算
+    /// （上传的文件自带文件名，见 `AppState.nextPasteName`）。
+    var isPaste = false
+
+    static func == (a: UploadItem, b: UploadItem) -> Bool { a.id == b.id }
+
+    var sizeText: String {
+        sizeKB >= 1024 ? String(format: "%.1f MB", Double(sizeKB) / 1024) : "\(sizeKB) KB"
+    }
+
+    /// 从磁盘文件建卡片；扩展名不在白名单里就返回 nil
+    init?(url: URL) {
+        let ext = url.pathExtension.lowercased()
+        guard Self.allowedExtensions.contains(ext) else { return nil }
+        self.url = url
+        self.name = url.lastPathComponent
+        let bytes = (try? FileManager.default.attributesOfItem(atPath: url.path))?[.size] as? Int ?? 0
+        self.sizeKB = max(bytes / 1024, 1)
+        if Self.imageExtensions.contains(ext) {
+            self.kind = .image
+            self.thumb = NSImage(contentsOf: url)
+        } else {
+            self.kind = .document
+            self.thumb = nil
+        }
+    }
+
+    /// 从剪贴板里的内存图片建卡片（截图、网页里右键复制的图）。
+    /// **会落成一张真 PNG 临时文件**（用户 2026-10-27 要求）—— 流水线只认磁盘文件，
+    /// 网页端也拿不到"内存里的图片"，很多网页版 App 都是这么做的。
+    ///
+    /// 名字由调用方给（`AppState.nextPasteName`），**不再从磁盘文件名倒推**：
+    /// 以前是「临时目录里没被占用的最小序号」，而临时目录里的旧图 App 退出也不清，
+    /// 序号就一路涨到 8、9、10，关掉重开也回不到 1（用户 2026-10-27 报的问题）。
+    init(image: NSImage, name: String) {
+        self.kind = .image
+        self.thumb = image
+        self.isPaste = true
+        let png = image.tiffRepresentation
+            .flatMap { NSBitmapImageRep(data: $0) }?
+            .representation(using: .png, properties: [:])
+        self.sizeKB = max((png?.count ?? 0) / 1024, 1)
+
+        let url = UploadItem.pasteDirectory.appendingPathComponent("\(name).png")
+        try? FileManager.default.createDirectory(at: UploadItem.pasteDirectory,
+                                                 withIntermediateDirectories: true)
+        if let png = png, (try? png.write(to: url)) != nil {
+            self.url = url
+            self.name = url.lastPathComponent
+        } else {
+            // 落盘失败也别让卡片消失，至少还能看、还能移除
+            self.url = nil
+            self.name = "\(name) \(Int(image.size.width))×\(Int(image.size.height))"
+        }
+    }
+
+    /// 剪贴板图片的落盘目录。用系统临时目录：App 退出后由系统回收，
+    /// 卡片被移除或生成成功时我们也会主动删。
+    static var pasteDirectory: URL {
+        FileManager.default.temporaryDirectory.appendingPathComponent("作文批改-粘贴", isDirectory: true)
+    }
+}
+
 final class AppState: ObservableObject {
-    enum Slot { case topic, essay }
+    enum Slot: Hashable { case topic, essay }
 
     @Published var topicURL: URL?
     @Published var essayURL: URL?
+
+    /// 两个上传框里的内容。界面和流水线都按它走。
+    /// `topicURL` / `essayURL` 退化成「框里那个文档」的镜像，只为几处老判断还能用。
+    @Published var uploads: [Slot: [UploadItem]] = [:]
+
+    /// 当前处于「等待粘贴」状态的框，同时只有一个：点另一个框会把它取消。
+    @Published var pasteArmed: Slot?
+
+    /// 框内点击的「票据」：框内任何点击（左键 tap、加号、右键）都会置 true。
+    /// 全局鼠标监听在 mouseUp 之后看一眼：**有票就不取消，没票就取消**。
+    ///
+    /// 用户 2026-10-27 定的规矩：**框内再点不取消，只有点框外才取消**。
+    /// 一开始用的是时间戳（框内点击刷新时间），但右键可以按住不放 ——
+    /// 按住的时长会把时间戳拖过阈值，长按右键就被误判成「点在外面」。
+    /// 换成一次性票据，跟按键时长完全无关。
+    var insideClickTicket = false
+
+    /// 框内被点击：激活等待粘贴，并留一张票（让框外监听知道这一下不算「点在外面」）
+    func armPaste(_ slot: Slot) {
+        pasteArmed = slot
+        insideClickTicket = true
+    }
+
+    /// 框内某个控件（加号、缩略图）被点了：本来就在等粘贴的话，别退出
+    func keepPasteArmed(_ slot: Slot) {
+        if pasteArmed == slot { insideClickTicket = true }
+    }
+
+    /// 右键弹出的小菜单：哪个框、弹在框内哪个位置（左上原点，单位 pt）。
+    /// 用户 2026-10-27：右键**不直接粘贴**，只激活 + 冒出这个两选一的小菜单。
+    @Published var pasteMenuSlot: Slot?
+    @Published var pasteMenuPoint: CGPoint = .zero
+
+    /// 右键：激活这个框，并在鼠标位置冒出「粘贴 / 取消」小菜单
+    func openPasteMenu(_ slot: Slot, at point: CGPoint) {
+        armPaste(slot)
+        pasteMenuPoint = point
+        pasteMenuSlot = slot
+    }
+
+    func closePasteMenu() { pasteMenuSlot = nil }
+
+    /// 短提示：粘贴被拒、数量超限之类。渐显出现，停 2.7 秒后渐隐。
+    /// `toastSlot` 记住这句话是哪个框说的 —— 提示要落在那个框的正中心（用户 2026-10-27 要求）。
+    @Published var toast: String?
+    @Published var toastSlot: Slot?
+    private var toastItem: DispatchWorkItem?
+
+    /// 点开预览的那张卡片。图片放大看内容，文档放大看完整信息。
+    /// 点一下放大后的内容就关掉（用户 2026-10-27 要求）。
+    @Published var previewItem: UploadItem?
     @Published var login = LoginStatus()
     @Published var isRunning = false
     @Published var progress = ProgressInfo()
     @Published var diagnostics = ""
     @Published var autoSend = true
     @Published var progressLines: [String] = []
-    /// 一进失败态就自动留一份日志（写 App 支持目录，不打扰用户）。
-    /// 挂 didSet 而不是在每个失败分支里各写一次 —— 失败出口有六七个，漏一个就没日志。
+    /// 一进失败态就把原因补进运行日志（用户 2026-10-27：
+    /// **不要再单独导出 md / 截图，也不要在生成框里换按钮** —— 失败成功都只在「详情」里看）。
+    /// 挂 didSet 而不是在每个失败分支里各写一次 —— 失败出口有六七个，漏一个就少一条日志。
     @Published var docx: DocxState = .idle {
         didSet {
-            if case .failed = docx { saveDiagnosticLog() }
+            if case .failed(let why) = docx { log("✗ 生成失败：\(why)") }
         }
     }
     /// 用户点了「中止」
@@ -98,8 +231,19 @@ final class AppState: ObservableObject {
     /// 第一次检测有结论之前不显示「登录」按钮 —— 否则一开 App 就闪一下"未登录"，很吓人
     @Published var loginSettled = false
 
-    /// 最近一次失败原因
-    @Published var lastFailure = ""
+    /// 双绿灯（已登录 + 深度思考/智能搜索已激活）之后 0.5 秒才放出「登出 DeepSeek」按钮。
+    /// 延迟是为了不让「登录成功」和「冒出新按钮」发生在同一瞬间 —— 那样看着像闪了一下。
+    @Published var logoutReady = false
+    private var logoutWorkItem: DispatchWorkItem?
+    /// 兜底：已登录但模式迟迟没激活（网页改版、检测一直失败）时，到点也把按钮放出来。
+    /// 没有这个兜底，用户就没有任何登出入口 —— 底部那个「⋯」菜单已经删了。
+    private var logoutFallbackItem: DispatchWorkItem?
+    /// 双绿灯达成到按钮出现之间等多久（用户 2026-10-27 定的 0.5 秒）
+    private static let logoutDelay: TimeInterval = 0.5
+    /// 只有已登录、模式还没激活时，最多等这么久就把按钮放出来
+    private static let logoutFallbackDelay: TimeInterval = 8
+    /// 按钮淡入时长
+    private static let logoutFade: TimeInterval = 0.5
 
     /// 深度思考 / 智能搜索 的激活状态（在登录流程里探测，供 idleStatus 显示）
     @Published var deepThinkOn = false
@@ -174,14 +318,60 @@ final class AppState: ObservableObject {
         if Thread.isMainThread { apply() } else { DispatchQueue.main.async(execute: apply) }
     }
 
+    /// 短提示条：渐显 → 停 `seconds` 秒 → 渐隐。
+    /// `slot` 决定它落在哪个上传框的正中心；不传就退回窗口顶部（目前没有这种用法）。
+    /// 重复调用会重置计时（不叠着弹），`toastItem` 保证只有一个在排队。
+    func showToast(_ text: String, seconds: TimeInterval = 2.7, slot: Slot? = nil) {
+        toastItem?.cancel()
+        toastSlot = slot
+        withAnimation(.easeOut(duration: 0.18)) { toast = text }
+        let item = DispatchWorkItem { [weak self] in
+            guard let self = self else { return }
+            self.toastItem = nil
+            withAnimation(.easeIn(duration: 0.3)) {
+                self.toast = nil
+                self.toastSlot = nil
+            }
+        }
+        toastItem = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + seconds, execute: item)
+    }
+
+    /// 用户点了提示条：立刻收走，渐隐速度和渐显一样（0.18 秒）。
+    /// 自动消失仍走原来的 0.3 秒，两种节奏不一样是故意的 —— 手点的要跟手。
+    func dismissToast() {
+        guard toast != nil else { return }
+        toastItem?.cancel()
+        toastItem = nil
+        withAnimation(.easeOut(duration: 0.18)) {
+            toast = nil
+            toastSlot = nil
+        }
+    }
+
+    // MARK: - 卡片预览
+
+    func openPreview(_ item: UploadItem) {
+        withAnimation(.spring(response: 0.32, dampingFraction: 0.82)) {
+            previewItem = item
+        }
+    }
+
+    func closePreview() {
+        guard previewItem != nil else { return }
+        withAnimation(.easeOut(duration: 0.18)) { previewItem = nil }
+    }
+
     private var timer: Timer?
     private var pollBusy = false
     private var pollingStopped = false
 
-    static let docTypes: [UTType] = {
+    /// 选文件面板收哪些类型。doc / docx / pdf 是文档，png / jpg 是图片（扫描件、拍照、截图）。
+    static let uploadTypes: [UTType] = {
         var types: [UTType] = []
-        if let t = UTType(filenameExtension: "docx") { types.append(t) }
-        if let t = UTType(filenameExtension: "doc") { types.append(t) }
+        for ext in ["docx", "doc", "pdf", "png", "jpg"] {
+            if let t = UTType(filenameExtension: ext) { types.append(t) }
+        }
         return types.isEmpty ? [.data] : types
     }()
 
@@ -190,15 +380,20 @@ final class AppState: ObservableObject {
         countdownTimer?.invalidate()
     }
 
+    /// 两个框都有东西就能生成 —— 不再要求「必须是一个 docx」。
+    /// 框里可以是一份文档，也可以是一张/几张图片（剪贴板图片也算，它已经落盘成 PNG）。
     var canGenerate: Bool {
-        topicURL != nil && essayURL != nil && loginSettled && login.isLoggedIn && !isRunning
+        !items(for: .topic).isEmpty && !items(for: .essay).isEmpty
+            && loginSettled && login.isLoggedIn && !isRunning
     }
 
     var hintText: String {
         if login.kind == .jsDisabled {
             return "Safari 少一个开关：设置 → 开发 → 允许来自 Apple 事件的 JavaScript"
         }
-        if topicURL == nil || essayURL == nil { return "把作文题目和学生作文两个文件都放进来" }
+        if items(for: .topic).isEmpty || items(for: .essay).isEmpty {
+            return "作文题目和学生作文两边都要有文件"
+        }
         if !loginSettled { return "" }
         if !login.isLoggedIn { return "先点「登录 DeepSeek」，登录一次以后就不用再登" }
         return ""
@@ -216,11 +411,13 @@ final class AppState: ObservableObject {
 
     /// 空闲时状态框的文案。四种组合，用书面语说清楚下一步该干什么。
     var idleStatus: IdleStatus {
-        switch (topicURL != nil, essayURL != nil) {
+        let hasTopic = !items(for: .topic).isEmpty
+        let hasEssay = !items(for: .essay).isEmpty
+        switch (hasTopic, hasEssay) {
         case (false, false):
             return IdleStatus(
                 title: "等待上传文档",
-                detail: "请上传作文题目与学生作文两份 Word 文档，两份齐备后即可开始批改。",
+                detail: "请上传作文题目与学生作文，Word、PDF 或图片均可；两份齐备后即可开始批改。",
                 fraction: 0)
         case (true, false):
             return IdleStatus(
@@ -322,6 +519,9 @@ final class AppState: ObservableObject {
                     self.modeRetryWorkItem = nil
                 }
                 self.reactToLoginState()
+                // 每轮探针都顺手校准一次「登出 DeepSeek」按钮的放行状态：
+                // 退出登录时它要立刻消失。幂等，不会重复计时。
+                self.syncLogoutGate()
             }
         }
     }
@@ -434,6 +634,9 @@ final class AppState: ObservableObject {
                 self.deepThinkOn = finalDeepThink
                 self.smartSearchOn = finalSmartSearch
                 self.modesChecked = finalDeepThink && finalSmartSearch
+                // 第二个绿灯就在这里亮起来 —— 立刻开始算「登出」按钮那 0.5 秒延迟。
+                // 不能等下一轮登录探针（2 秒后）再算，那样按钮要 2.5 秒才出现。
+                self.syncLogoutGate()
                 if self.modesChecked {
                     // 登录流程结束后进度卡会回到 idleStatus；由它统一显示“已激活”，
                     // 不留一条成功提示遮住空闲状态框。
@@ -558,13 +761,64 @@ final class AppState: ObservableObject {
         }
     }
 
-    /// 右下角「⋯」里的退出登录 —— 现在由主界面弹自定义确认框（和退出 App 确认框
-    /// 一样：主界面绝对居中、整框玻璃、按钮玻璃），不再用 NSAlert 系统弹窗。
-    /// 确认后走下面的 logoutDeepSeek；生成进行中时确认框里的退出按钮是禁用的。
+    /// 双绿灯一变，就重新安排「登出 DeepSeek」按钮的出现时机。**幂等**，每轮登录探针都能调：
+    /// 已经在等那 0.5 秒的不会重新计时，已经亮了的不会重复亮。
+    private var logoutAllowed: Bool {
+        loginSettled && login.isLoggedIn && modesChecked
+    }
+
+    private func syncLogoutGate() {
+        let loggedIn = loginSettled && login.isLoggedIn
+        guard loggedIn else {
+            logoutWorkItem?.cancel()
+            logoutWorkItem = nil
+            logoutFallbackItem?.cancel()
+            logoutFallbackItem = nil
+            if logoutReady {
+                // 退出登录：按钮淡出
+                withAnimation(.easeOut(duration: Self.logoutFade)) { logoutReady = false }
+            }
+            return
+        }
+        // 只要登录了就先把兜底计时器挂上 —— 万一模式一直检测不出来，
+        // 到点仍然能给用户一个登出入口（底部那个「⋯」已经删了，没有别的路）。
+        scheduleLogoutFallback()
+        guard logoutAllowed else { return }
+        guard !logoutReady, logoutWorkItem == nil else { return }
+        let item = DispatchWorkItem { [weak self] in
+            guard let self = self else { return }
+            self.logoutWorkItem = nil
+            guard self.logoutAllowed else { return }
+            // 渐显：按钮从无到有，0.5 秒淡入
+            withAnimation(.easeOut(duration: Self.logoutFade)) { self.logoutReady = true }
+        }
+        logoutWorkItem = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.logoutDelay, execute: item)
+    }
+
+    /// 已登录、但双绿灯迟迟不达成时的兜底。
+    /// 只在本次登录会话里挂一次：按钮已经亮了就什么都不做。
+    private func scheduleLogoutFallback() {
+        guard !logoutReady, logoutFallbackItem == nil else { return }
+        let item = DispatchWorkItem { [weak self] in
+            guard let self = self else { return }
+            self.logoutFallbackItem = nil
+            guard self.loginSettled, self.login.isLoggedIn, !self.logoutReady else { return }
+            self.log("模式检测 \(Int(Self.logoutFallbackDelay)) 秒未完成，「登出」按钮按兜底放出")
+            withAnimation(.easeOut(duration: Self.logoutFade)) { self.logoutReady = true }
+        }
+        logoutFallbackItem = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.logoutFallbackDelay, execute: item)
+    }
+
+    /// 主界面右上角的「登出 DeepSeek」按钮 —— 点它只弹确认框，
+    /// 真正清登录态在确认后的 `logoutDeepSeek()`（和退出 App 确认框
+    /// 一样：主界面绝对居中、整框玻璃、按钮玻璃），不用 NSAlert 系统弹窗。
+    /// 生成进行中时确认框里的登出按钮是禁用的。
 
     /// 真的清登录态。清完直接把登录窗口弹出来，用户不用再找按钮。
     func logoutDeepSeek() {
-        say("正在退出 DeepSeek 账号…", detail: "清掉本机保存的登录信息", running: true)
+        say("正在登出 DeepSeek 账号…", detail: "清掉本机保存的登录信息", running: true)
         // 先停掉探针和倒计时，免得旧状态干扰新登录流程
         timer?.invalidate()
         timer = nil
@@ -582,6 +836,15 @@ final class AppState: ObservableObject {
         smartSearchOn = false
         modeCheckDetail = "正在等待 DeepSeek 输入区加载"
 
+        // 登出：「登出 DeepSeek」按钮立刻收掉，等重新登录 + 双绿灯后再出现。
+        // 这里直接置 false、不做淡出 —— 登出是一次明确的动作，按钮留着淡出反而拖沓。
+        // 兜底计时器也要一起取消，否则它会在重新登录后的第 8 秒把按钮提前放出来。
+        logoutWorkItem?.cancel()
+        logoutWorkItem = nil
+        logoutFallbackItem?.cancel()
+        logoutFallbackItem = nil
+        logoutReady = false
+
         // 把状态框重置回「等待检测」，否则退出后还显示"已登录"
         progress = ProgressInfo()
 
@@ -594,7 +857,7 @@ final class AppState: ObservableObject {
             self.login = LoginStatus(kind: .unknown)
             self.loginSettled = false
             self.pollingStopped = false
-            self.say("已退出 DeepSeek 账号", detail: "请在打开的窗口里重新登录",
+            self.say("已登出 DeepSeek 账号", detail: "请在打开的窗口里重新登录",
                     running: false, tone: .ok)
             self.openDeepSeek()
             // 清完数据后探针被停了，必须重新启动，否则登录成功没人发现
@@ -694,9 +957,11 @@ final class AppState: ObservableObject {
         let panel = NSOpenPanel()
         panel.canChooseFiles = true
         panel.canChooseDirectories = false
-        panel.allowsMultipleSelection = false
-        panel.allowedContentTypes = AppState.docTypes
-        panel.message = "只接受 doc 或 docx 文件"
+        // 允许多选：作文常是 1–3 张图片，一次挑完省得反复开面板。
+        // 超限的那些会被 addUpload 挡掉并冒泡说明原因。
+        panel.allowsMultipleSelection = true
+        panel.allowedContentTypes = AppState.uploadTypes
+        panel.message = "支持 doc / docx / pdf 与 png / jpg 图片，可一次选多个"
         panel.prompt = "选择"
         panel.title = slot == .topic ? "选择作文题目" : "选择学生作文"
         panel.isExtensionHidden = false
@@ -704,8 +969,12 @@ final class AppState: ObservableObject {
         panel.directoryURL = startDirectory(for: slot)
 
         let handle: (NSApplication.ModalResponse) -> Void = { [weak self] response in
-            guard let self = self, response == .OK, let url = panel.url else { return }
-            self.accept(url, for: slot)
+            guard let self = self, response == .OK else { return }
+            let urls = panel.urls
+            guard !urls.isEmpty else { return }
+            // 逐个放进去，放不下的由 addUpload 冒泡说明原因（超数量 / 混放 / 类型不对）
+            for url in urls { self.accept(url, for: slot) }
+            if let first = urls.first { self.rememberDirectory(first, slot: slot) }
         }
 
         if let window = NSApp.keyWindow ?? NSApp.mainWindow {
@@ -716,23 +985,153 @@ final class AppState: ObservableObject {
     }
 
     private func accept(_ url: URL, for slot: Slot) {
-        switch slot {
-        case .topic: topicURL = url
-        case .essay: essayURL = url
+        guard let item = UploadItem(url: url) else {
+            showToast("这个文件类型不支持，只收 doc / docx / pdf / png / jpg", slot: slot)
+            return
         }
-        rememberDirectory(url, slot: slot)
-        // 不在这里改状态框文案 —— 状态框由 idleStatus 统一按「两个文件 + 登录」推算，
-        // 之前那种"已选择 xxx.docx"只反映最后一次操作，看起来像另一个文件丢了。
-        // 上一次成功提示也顺便清掉，让状态框回到"还差哪一步"。
+        if addUpload(item, for: slot) { rememberDirectory(url, slot: slot) }
+    }
+
+    // MARK: - 上传框内容（文档 / 图片）
+
+    /// 图片最多几张、文档最多几个。题目篇幅极短，图片只给 1 张（用户 2026-10-27 定的）。
+    static func limits(for slot: Slot) -> (images: Int, docs: Int) {
+        slot == .topic ? (images: 1, docs: 1) : (images: 3, docs: 1)
+    }
+
+    /// 剪贴板图片的下一个名字：`剪贴板图片1`、`剪贴板图片2`……（不带 `-`）
+    ///
+    /// 只数**两个框里当前还在的**剪贴板图片，上传的文件不算（它们自带文件名）。
+    /// 用户 2026-10-27 明确：命名要跟着 App 里的实际情况走 ——
+    /// 以前是「临时目录里没被占用的最小序号」，而临时目录里的旧图 App 退出也不清，
+    /// 序号就一路涨到 8、9、10，关掉重开也回不到 1。
+    /// 取「当前没被占用的最小正整数」，所以删掉中间一张再粘，序号会补回空位，不会一直涨。
+    func nextPasteName() -> String {
+        var used = Set<Int>()
+        for slot in [Slot.topic, Slot.essay] {
+            for item in uploads[slot] ?? [] where item.isPaste {
+                if let n = Self.pasteIndex(item.name) { used.insert(n) }
+            }
+        }
+        var i = 1
+        while used.contains(i) { i += 1 }
+        return "剪贴板图片\(i)"
+    }
+
+    /// 从「剪贴板图片3.png」里取出 3
+    private static func pasteIndex(_ name: String) -> Int? {
+        let head = "剪贴板图片"
+        guard name.hasPrefix(head) else { return nil }
+        let digits = name.dropFirst(head.count).prefix { $0.isNumber }
+        return Int(digits)
+    }
+
+    func items(for slot: Slot) -> [UploadItem] { uploads[slot] ?? [] }
+
+    /// 还能不能再放一个 `kind`：能放返回 nil，不能放返回给用户看的拒绝理由。
+    /// 两条硬规矩：同一个框里不许混放；同类不超过上限。
+    func uploadRejection(for slot: Slot, adding kind: UploadItem.Kind) -> String? {
+        let current = items(for: slot)
+        let caps = AppState.limits(for: slot)
+        if let first = current.first, first.kind != kind {
+            return first.kind == .image
+                ? "这个框里已经放了图片，不能再放文档（一个框只放一类）"
+                : "这个框里已经放了文档，不能再放图片（一个框只放一类）"
+        }
+        let sameKind = current.filter { $0.kind == kind }.count
+        let cap = kind == .image ? caps.images : caps.docs
+        guard sameKind < cap else {
+            return kind == .image
+                ? "最多 \(cap) 张图片，先移除一张再放"
+                : "文档只能放 1 个，先移除再放"
+        }
+        return nil
+    }
+
+    /// 放进框里。放不进去就弹短提示并返回 false。
+    @discardableResult
+    func addUpload(_ item: UploadItem, for slot: Slot) -> Bool {
+        if let reason = uploadRejection(for: slot, adding: item.kind) {
+            showToast(reason, slot: slot)
+            return false
+        }
+        uploads[slot, default: []].append(item)
+        syncLegacyURL(for: slot)
+        if !isRunning && progress.tone == .ok { progress = ProgressInfo() }
+        return true
+    }
+
+    func removeUpload(_ id: UploadItem.ID, for slot: Slot) {
+        if let doomed = uploads[slot]?.first(where: { $0.id == id }) {
+            deletePasteFile(for: doomed)
+        }
+        uploads[slot]?.removeAll { $0.id == id }
+        if (uploads[slot] ?? []).isEmpty { uploads[slot] = nil }
+        syncLegacyURL(for: slot)
         if !isRunning && progress.tone == .ok { progress = ProgressInfo() }
     }
 
+    /// 清空一个框（含「换一个文件」的语义）
     func clearFile(for slot: Slot) {
-        switch slot {
-        case .topic: topicURL = nil
-        case .essay: essayURL = nil
-        }
+        for item in items(for: slot) { deletePasteFile(for: item) }
+        uploads[slot] = nil
+        syncLegacyURL(for: slot)
         if !isRunning && progress.tone == .ok { progress = ProgressInfo() }
+    }
+
+    /// 删掉我们落在临时目录里的剪贴板图片。
+    /// **只删自己创建的那一份**（路径必须正好在 `pasteDirectory` 下），用户磁盘上的原文件绝不碰。
+    private func deletePasteFile(for item: UploadItem) {
+        guard let url = item.url,
+              url.deletingLastPathComponent().standardizedFileURL == UploadItem.pasteDirectory.standardizedFileURL
+        else { return }
+        try? FileManager.default.removeItem(at: url)
+    }
+
+    /// `topicURL` / `essayURL` 现在只是「框里那个文档」的镜像，流水线已改为直接读 `uploads`。
+    /// 留着是因为还有几处按「有没有文档」做判断，改起来不值当。
+    private func syncLegacyURL(for slot: Slot) {
+        let doc = items(for: slot).first { $0.kind == .document }?.url
+        switch slot {
+        case .topic: topicURL = doc
+        case .essay: essayURL = doc
+        }
+    }
+
+    /// ⌘V：从剪贴板往框里放一个文件或一张图。
+    /// - 剪贴板里有多个文件 → 直接拒绝（用户定的规矩）
+    /// - 恰好一个文件 → 按扩展名收下
+    /// - 没有文件但有图（截图、网页里复制的图）→ 当作图片收下
+    /// 数量 / 种类超限同样拒绝，提示落在被操作的那个框的正中心。
+    func pasteFromClipboard(into slot: Slot) {
+        let pb = NSPasteboard.general
+
+        let options: [NSPasteboard.ReadingOptionKey: Any] = [.urlReadingFileURLsOnly: true]
+        let urls = (pb.readObjects(forClasses: [NSURL.self], options: options) as? [URL]) ?? []
+
+        if urls.count > 1 {
+            showToast("剪贴板里有 \(urls.count) 个文件，一次只能粘贴 1 个", slot: slot)
+            return
+        }
+        if let url = urls.first {
+            guard let item = UploadItem(url: url) else {
+                showToast("这个文件类型不支持，只收 doc / docx / pdf / png / jpg", slot: slot)
+                return
+            }
+            // 成功放进框里不弹提示 —— 卡片本身就是反馈（用户 2026-10-27 要求：
+            // 只有「类型不对 / 数量超了」这种被拒的情况才冒泡）
+            addUpload(item, for: slot)
+            return
+        }
+        if let image = NSImage(pasteboard: pb) {
+            let item = UploadItem(image: image, name: nextPasteName())
+            // 被拒（数量满了之类）就别在临时目录里留一张没人用的图
+            if !addUpload(item, for: slot), let url = item.url {
+                try? FileManager.default.removeItem(at: url)
+            }
+            return
+        }
+        showToast("剪贴板里没有可用的文件或图片", slot: slot)
     }
 
     // MARK: - 内置附件
@@ -754,9 +1153,10 @@ final class AppState: ObservableObject {
 
     // MARK: - 生成
 
-    /// 已经提交出去、但为了防重复生成而从上传框里清掉的两个文件。
+    /// 已经提交出去、但为了防重复生成而从上传框里清掉的文件（两个框各一组）。
     /// 失败或中止时放回去，用户不用重新选一遍。
-    @Published var heldFiles: (topic: URL, essay: URL)?
+    /// 存 `UploadItem` 而不是 URL：缩略图、文件名、大小都跟着回去，界面不会闪一下。
+    @Published var heldFiles: (topic: [UploadItem], essay: [UploadItem])?
 
     func generate() {
         guard canGenerate else { return }
@@ -764,26 +1164,87 @@ final class AppState: ObservableObject {
     }
 
     /// 提交后立刻清空两个上传框：同一批文件不会被反复提交，也避免误点出第二份批改稿。
-    /// 调用前必须先把两个 URL 拷出来（runPipeline 里已拷到局部变量）。
+    /// 调用前必须先把两组文件拷出来（runPipeline 里已拷到局部变量）。
     func submitAndClearUploads() {
-        guard let topic = topicURL, let essay = essayURL else { return }
+        let topic = items(for: .topic)
+        let essay = items(for: .essay)
+        guard !topic.isEmpty, !essay.isEmpty else { return }
         heldFiles = (topic, essay)
         topicURL = nil
         essayURL = nil
+        uploads[.topic] = nil
+        uploads[.essay] = nil
+        pasteArmed = nil
     }
 
     /// 失败 / 中止时把文件放回上传框
     func restoreHeldFiles() {
         guard let held = heldFiles else { return }
-        topicURL = held.topic
-        essayURL = held.essay
+        // 卡片放回去，URL 镜像跟着重算 —— 不然框里空着、URL 却有了，界面自相矛盾
+        if items(for: .topic).isEmpty { uploads[.topic] = held.topic }
+        if items(for: .essay).isEmpty { uploads[.essay] = held.essay }
+        syncLegacyURL(for: .topic)
+        syncLegacyURL(for: .essay)
+        heldFiles = nil
+    }
+
+    /// 成功了：这批文件再也用不上，顺手把落在临时目录里的剪贴板图片删掉。
+    private func discardHeldFiles() {
+        if let held = heldFiles {
+            for item in held.topic + held.essay { deletePasteFile(for: item) }
+        }
         heldFiles = nil
     }
 
     // MARK: - 内置 Python 执行
 
     @Published var scriptOutput = ""
-    @Published var showOutputPanel = false
+
+    /// 运行日志面板（成功、失败都从这里看，见 `LogPanel`）。
+    /// 2026-10-27 用户定：失败时**不换按钮、不弹面板、不导 md/截图**，
+    /// 一律只在这个面板里看 —— 所以 `progressLines` 是唯一的日志出口。
+    @Published var showLog = false
+
+    func openLog() {
+        guard !showLog else { return }
+        withAnimation(.easeOut(duration: 0.18)) { showLog = true }
+    }
+
+    func closeLog() {
+        guard showLog else { return }
+        withAnimation(.easeOut(duration: 0.18)) { showLog = false }
+    }
+
+    func toggleLog() {
+        if showLog { closeLog() } else { openLog() }
+    }
+
+    /// 开发用：`--logdemo` 造一份像样的日志并把面板打开，
+    /// 不用真跑一轮三分钟就能看版式、确认面板没盖住「详情」按钮。
+    func applyLogDemo() {
+        // 照抄一次真实运行的日志（2026-10-27 第 4 套 PDF 那轮），
+        // 演示面板的时候看到的就是真实形态，不是编的。
+        progressLines = [
+            "页面重载：2.4 秒",
+            "等输入框出现：0.4 秒",
+            "页面：{\"textarea\":true,\"fileInputs\":1,\"sendLabel\":\"\",\"deepThink\":true,\"smartSearch\":true}",
+            "载入 作文批改规则.md（20 KB）",
+            "载入 标准模式批改.docx（32 KB）",
+            "载入 第4套-题目.pdf（44 KB）",
+            "载入 第4套-学生作文.pdf（30 KB）",
+            "注入：INPUT:4/0",
+            "4 个附件已就位（127 KB）",
+            "提示词已填入并回读一致（853 字）",
+            "发送结果：ENTER",
+            "第 1 轮：生成中，已写 1240 字",
+            "第 3 轮：生成中，已写 3870 字",
+            "代码出现收尾标志：末尾有 .save( 调用",
+            "内容稳定 60 秒且有收尾标志，按完成处理",
+            "抓到 1 个代码块，原文总长 11942 字符",
+            "脚本 11943 字符，直接执行",
+        ]
+        showLog = true
+    }
 
     var pythonReady: Bool { PythonRunner.isAvailable }
 
@@ -807,7 +1268,6 @@ final class AppState: ObservableObject {
         }
         isRunning = true
         scriptOutput = ""
-        lastFailure = ""
         docx = .building
         say("正在生成 Word 批改稿…", detail: "大约需要几十秒，请稍等", running: true)
 
@@ -824,11 +1284,10 @@ final class AppState: ObservableObject {
             DispatchQueue.main.async {
                 self.isRunning = false
                 if let failure = failure {
-                    self.lastFailure = failure
                     self.docx = .failed(failure)
                     self.scriptOutput = failure
                     self.restoreHeldFiles()
-                    self.say("生成失败了", detail: "可以点下面「查看详情」看原因，或再试一次",
+                    self.say("生成失败了", detail: "点 Word 卡右上角「详情」可以看这次运行的日志，或再试一次",
                              running: false, tone: .error)
                     return
                 }
@@ -838,12 +1297,11 @@ final class AppState: ObservableObject {
                 if result.cancelled {
                     self.docx = .idle
                     self.restoreHeldFiles()
-                    self.say("已中止", detail: "批改稿没有生成，两份文档已放回上传框，可以重新来一次",
+                    self.say("已中止", detail: "批改稿没有生成，文件已放回上传框，可以重新来一次",
                              running: false)
                     return
                 }
                 if result.timedOut {
-                    self.lastFailure = "执行超时（4 分钟）"
                     self.docx = .failed("执行超时（4 分钟）")
                     self.restoreHeldFiles()
                     self.say("生成超时了", detail: "脚本跑了 4 分钟还没结束，已强制停下",
@@ -852,16 +1310,14 @@ final class AppState: ObservableObject {
                 }
                 if result.exitCode != 0 {
                     let msg = "脚本报错（退出码 \(result.exitCode)）"
-                    self.lastFailure = msg
                     self.docx = .failed(msg)
                     self.restoreHeldFiles()
-                    self.say("生成失败了", detail: "可以点下面「查看详情」看原因，或再试一次",
+                    self.say("生成失败了", detail: "点 Word 卡右上角「详情」可以看这次运行的日志，或再试一次",
                              running: false, tone: .error)
                     return
                 }
                 let docs = result.producedFiles.filter { $0.pathExtension.lowercased() == "docx" }
                 guard !docs.isEmpty else {
-                    self.lastFailure = "脚本跑完了，但没有产出 docx"
                     self.docx = .failed("没有产出 docx")
                     self.restoreHeldFiles()
                     self.say("生成失败了", detail: "脚本跑完了，但没有产出 Word 文件",
@@ -870,7 +1326,7 @@ final class AppState: ObservableObject {
                 }
                 if let stored = self.storeProduced(docs) {
                     self.docx = .ready(stored)
-                    self.heldFiles = nil          // 成功了就不再需要"放回去"
+                    self.discardHeldFiles()       // 成功了就不再需要"放回去"，剪贴板图片也一并清掉
                     self.say("批改稿生成好了 ✓", detail: "在下面点「下载 Word 批改稿」保存到电脑里",
                              running: false, tone: .ok)
                 } else {
@@ -941,140 +1397,6 @@ final class AppState: ObservableObject {
         return "批改-\(df.string(from: Date())).docx"
     }
 
-    // MARK: - 失败诊断（Markdown 报告 + 页面截图）
-
-    private static func timeStamp() -> String {
-        let df = DateFormatter()
-        df.dateFormat = "yyyyMMdd-HHmmss"
-        return df.string(from: Date())
-    }
-
-    /// 报告正文。用 Markdown 而不是 json/txt：能放标题、表格、代码块，
-    /// 还能直接 `![]()` 引一张截图，老师用「预览」打开就能看，发给开发也好读。
-    private func diagnosticMarkdown(stamp: String, shotName: String?) -> String {
-        var md: [String] = []
-        md.append("# 作文批改 · 失败诊断报告")
-        md.append("")
-        md.append("| 项目 | 内容 |")
-        md.append("| --- | --- |")
-        md.append("| 生成时间 | \(stamp) |")
-        let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?"
-        md.append("| App 版本 | \(version) |")
-        md.append("| 系统版本 | \(ProcessInfo.processInfo.operatingSystemVersionString) |")
-        md.append("| 页面地址 | \(browser.currentURL.isEmpty ? "（无）" : browser.currentURL) |")
-        md.append("")
-
-        if let shot = shotName {
-            md.append("## 失败时的页面")
-            md.append("")
-            md.append("![页面截图](\(shot))")
-            md.append("")
-        } else {
-            md.append("> 页面截图没有取到（页面可能还没加载完，或者窗口还没建出来）。")
-            md.append("")
-        }
-
-        md.append("## 失败原因")
-        md.append("")
-        md.append(lastFailure.isEmpty ? (progress.detail.isEmpty ? "（没有记录）" : progress.detail)
-                                      : lastFailure)
-        md.append("")
-        md.append("## 界面最后一次提示")
-        md.append("")
-        md.append("\(progress.title) ｜ \(progress.detail)")
-        md.append("")
-        md.append("## Python 输出")
-        md.append("")
-        md.append("```text")
-        md.append(scriptOutput.isEmpty ? "（没有输出）" : scriptOutput)
-        md.append("```")
-        md.append("")
-        md.append("## 流程记录")
-        md.append("")
-        md.append("```text")
-        md.append(progressLines.isEmpty ? "（无）" : progressLines.joined(separator: "\n"))
-        md.append("```")
-        md.append("")
-        return md.joined(separator: "\n")
-    }
-
-    /// 失败时自动留档：静默写进 App 支持目录，桌面上不弹任何东西。
-    /// 用户的原话是「失败就失败吧，只要存日志即可」——所以默认不打扰，
-    /// 需要发给开发者时再点「导出诊断文件」。
-    func saveDiagnosticLog() {
-        let stamp = AppState.timeStamp()
-        let finish: () -> Void = { [weak self] in
-            guard let self = self else { return }
-            self.browser.snapshotPNG { png in
-                let fm = FileManager.default
-                guard let base = fm.urls(for: .applicationSupportDirectory,
-                                         in: .userDomainMask).first else { return }
-                let dir = base.appendingPathComponent("作文批改/日志", isDirectory: true)
-                try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
-                let shotName = "失败-\(stamp)-页面.png"
-                if let png = png {
-                    try? png.write(to: dir.appendingPathComponent(shotName))
-                }
-                let md = self.diagnosticMarkdown(stamp: stamp,
-                                                 shotName: png != nil ? shotName : nil)
-                let out = dir.appendingPathComponent("失败-\(stamp).md")
-                try? md.write(to: out, atomically: true, encoding: .utf8)
-                self.log("失败日志已存：\(out.path)")
-                AppState.pruneLogs(in: dir, keep: 30)
-            }
-        }
-        if Thread.isMainThread { finish() } else { DispatchQueue.main.async(execute: finish) }
-    }
-
-    /// 只留最近 N 份，免得日志目录无限长大
-    private static func pruneLogs(in dir: URL, keep: Int) {
-        let fm = FileManager.default
-        guard let files = try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)
-        else { return }
-        let reports = files.filter { $0.pathExtension == "md" }
-            .sorted { $0.lastPathComponent > $1.lastPathComponent }
-        guard reports.count > keep else { return }
-        for old in reports.dropFirst(keep) {
-            let stem = old.deletingPathExtension().lastPathComponent
-            try? fm.removeItem(at: old)
-            let png = dir.appendingPathComponent("\(stem)-页面.png")
-            try? fm.removeItem(at: png)
-        }
-    }
-
-    /// 点「导出诊断文件」：在桌面生成一个文件夹，里面是 md 报告 + 截图，直接发人。
-    func exportDiagnostics() {
-        let stamp = AppState.timeStamp()
-        browser.snapshotPNG { [weak self] png in
-            guard let self = self else { return }
-            let fm = FileManager.default
-            guard let desktop = fm.urls(for: .desktopDirectory,
-                                        in: .userDomainMask).first else {
-                self.say("导出失败", detail: "找不到桌面目录", running: false, tone: .error)
-                return
-            }
-            let dir = desktop.appendingPathComponent("作文批改-失败诊断-\(stamp)",
-                                                     isDirectory: true)
-            do {
-                try fm.createDirectory(at: dir, withIntermediateDirectories: true)
-                let shotName = "页面截图.png"
-                if let png = png {
-                    try png.write(to: dir.appendingPathComponent(shotName))
-                }
-                let md = self.diagnosticMarkdown(stamp: stamp,
-                                                 shotName: png != nil ? shotName : nil)
-                let out = dir.appendingPathComponent("诊断报告.md")
-                try md.write(to: out, atomically: true, encoding: .utf8)
-                self.say("诊断报告已导出到桌面 ✓", detail: out.lastPathComponent,
-                         running: false, tone: .ok)
-                self.revealInFinder(out)
-            } catch {
-                self.say("导出失败", detail: error.localizedDescription,
-                         running: false, tone: .error)
-            }
-        }
-    }
-
     // MARK: - 开发用：登录流程自检
 
     /// `--logintest` 启动：强制成「未登录」→ 打开登录窗口 → 等真实探针发现已登录
@@ -1135,7 +1457,9 @@ final class AppState: ObservableObject {
     // MARK: - 开发用：界面状态演示
 
     /// `--uidemo` 1=生成中 / 2=已出成品 / 3=失败 / 4=只传题目 / 5=只传作文 / 6=都传但未登录
-    /// 只为截图检查视觉，不碰网络、不跑脚本。正式使用不会触发。
+    /// 7=新版上传框（题目 1 个文档 + 作文 3 张图片，已满额）
+    /// 8=同 7，但作文框处于「等待粘贴」态，并弹一条超限提示
+    /// 只为看视觉，不碰网络、不跑脚本。正式使用不会触发。
     func applyUIDemo(step: Int) {
         let topic = URL(fileURLWithPath: "/Users/Shared/2026届高三英语上学期期中作文题.docx")
         let essay = URL(fileURLWithPath: "/Users/Shared/2026届高三英语上学期期中-学生作文.docx")
@@ -1143,25 +1467,52 @@ final class AppState: ObservableObject {
         loginSettled = true
         progress = ProgressInfo()
 
+        // 演示态一律走 uploads —— 界面只认它，topicURL/essayURL 只是镜像
+        func fill(_ slot: Slot, _ items: [UploadItem]) {
+            uploads[slot] = items
+            syncLegacyURL(for: slot)
+        }
+        let topicItem = UploadItem(url: topic)
+        let essayItem = UploadItem(url: essay)
+
         switch step {
         case 4:
-            topicURL = topic
+            if let item = topicItem { fill(.topic, [item]) }
             return
         case 5:
-            essayURL = essay
+            if let item = essayItem { fill(.essay, [item]) }
             return
         case 6:
-            topicURL = topic
-            essayURL = essay
+            if let item = topicItem { fill(.topic, [item]) }
+            if let item = essayItem { fill(.essay, [item]) }
             login = LoginStatus(kind: .loggedOut)
             pollingStopped = true      // 演示用：别让真实探针把状态改回去
+            return
+        case 7, 8:
+            if let item = topicItem { fill(.topic, [item]) }
+            fill(.essay, AppState.demoImages(3).enumerated().map { UploadItem(image: $1, name: "剪贴板图片\($0 + 1)") })
+            pollingStopped = true
+            if step == 8 {
+                pasteArmed = .essay
+                showToast("最多 3 张图片，先移除一张再放", seconds: 8, slot: .essay)
+            }
+            return
+        case 9:
+            // 验证「Word 能不能真渲染」：直接拿包内那份真实的 docx 打开预览，
+            // 省得还要先拖个文件进来。作文框照旧放 3 张图。
+            if let tpl = AppState.bundledTemplate, let item = UploadItem(url: tpl) {
+                fill(.topic, [item])
+                previewItem = item
+            }
+            fill(.essay, AppState.demoImages(3).enumerated().map { UploadItem(image: $1, name: "剪贴板图片\($0 + 1)") })
+            pollingStopped = true
             return
         default:
             break
         }
 
-        topicURL = topic
-        essayURL = essay
+        if let item = topicItem { fill(.topic, [item]) }
+        if let item = essayItem { fill(.essay, [item]) }
         if step == 1 {
             isRunning = true
             progress = ProgressInfo(
@@ -1173,9 +1524,8 @@ final class AppState: ObservableObject {
             isRunning = false
             progress = ProgressInfo(
                 title: "生成失败了",
-                detail: "可以点下面「查看详情」看原因，或再试一次",
+                detail: "点 Word 卡右上角「详情」可以看这次运行的日志，或再试一次",
                 fraction: 0, running: false, tone: .error)
-            lastFailure = "脚本报错（退出码 1）"
             scriptOutput = "Traceback (most recent call last):\n  File \"生成批改.py\", line 42\nKeyError: 'style'"
             docx = .failed("脚本报错（退出码 1）")
         } else {
@@ -1185,6 +1535,33 @@ final class AppState: ObservableObject {
                 detail: "在下面点「下载 Word 批改稿」保存到电脑里",
                 fraction: 1, running: false, tone: .ok)
             docx = .ready(URL(fileURLWithPath: "/tmp/批改稿.docx"))
+        }
+    }
+
+    /// 演示用：画几张「扫描件」样子的图，好让预览卡片里有真缩略图。
+    /// 只有 `--uidemo7/8` 会用到。
+    static func demoImages(_ count: Int) -> [NSImage] {
+        (1...max(count, 1)).map { i in
+            let size = NSSize(width: 520, height: 700)
+            let image = NSImage(size: size)
+            image.lockFocus()
+            NSColor.white.setFill()
+            NSRect(origin: .zero, size: size).fill()
+            let border = NSBezierPath(rect: NSRect(origin: .zero, size: size).insetBy(dx: 14, dy: 14))
+            border.lineWidth = 2
+            NSColor(calibratedWhite: 0.90, alpha: 1).setStroke()
+            border.stroke()
+            NSColor(calibratedWhite: 0.80, alpha: 1).setFill()
+            for row in 0..<9 {
+                let w = size.width - 96 - CGFloat((row % 3) * 46)
+                NSRect(x: 48, y: size.height - 130 - CGFloat(row) * 58, width: w, height: 11).fill()
+            }
+            ("扫描件 \(i)" as NSString).draw(
+                at: NSPoint(x: 48, y: 44),
+                withAttributes: [.font: NSFont.systemFont(ofSize: 20, weight: .semibold),
+                                 .foregroundColor: NSColor(calibratedWhite: 0.55, alpha: 1)])
+            image.unlockFocus()
+            return image
         }
     }
 }

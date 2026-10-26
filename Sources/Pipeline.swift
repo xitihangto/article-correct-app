@@ -1,7 +1,7 @@
 import Foundation
 import AppKit
 
-private struct UploadItem {
+private struct FilePayload {
     var url: URL
     var name: String
     var mime: String
@@ -9,19 +9,32 @@ private struct UploadItem {
 
 extension AppState {
 
-    static let promptText = """
-    我发你 4 个文件，分别是 1.《作文批改规则.md》、2.《标准模式批改.docx》、3.《题目.doc/docx》、4.《作文.doc/docx》，其中 3、4 可能没有严格命名，需要你自行判断哪个是题目，哪个是作文，而且其内容可能是文本也可能是扫描件或者照片插入进 word 文档内，需要你来识别执行（有时候照片会拍进多余的内容需要你提取，其中的作文照片可能有学生的涂改痕迹，你自行判断最终形态，如有手写红笔批改痕迹请忽略）。《作文批改规则.md》所规定的内容，版式照《标准模式批改.docx》，遇见《作文批改规则.md》未明确规定的事项，可以从《标准模式批改.docx》参照模仿。因为现在是网页版无法输出文件，请你给出 Python 脚本文件我自己去执行，其他规则不变。
+    /// 提示词。文件总数按实际附件算，不写死 4 —— 作文可能是 1–3 张图片，
+    /// 加上题目那张，总数会到 5–8 个。告诉 AI 一个不对的数字只会让它犹豫。
+    /// 正文与用户给的 `提示词.txt` 保持一致，只替换了开头的数量。
+    static func promptText(fileCount: Int) -> String {
+        // 常态 4 个；多出来的都是作文的另外几页图片，提前说清楚，省得它当成新文件
+        let lead = fileCount == 4
+            ? "我发你 4 个文件"
+            : "我发你 \(fileCount) 个文件（通常 4 个，多出来的是同一篇作文的另外几页图片）"
+        // 文件多于 4 个时，「3、4」的说法就不够了，往后顺延
+        let naming = fileCount > 4
+            ? "其中第 3 个及之后可能没有严格命名"
+            : "其中 3、4 可能没有严格命名"
+        return """
+        \(lead)，分别是 1.《作文批改规则.md》、2.《标准模式批改.docx》、3.《题目》、4.《作文》，\(naming)，需要你自行判断哪个是题目，哪个是作文，而且其内容可能是文本也可能是扫描件或者照片插入进 word 文档内，甚至直接就是图片，其中作文由于篇幅关系或者试卷换页的缘故，可能是1-3 张图片，需要你来识别（有时候照片会拍进多余的内容需要你提取，其中的《作文》照片可能有学生的涂改痕迹，你自行判断最终形态，如有手写红笔批改痕迹请忽略）。识别全部文件以后，请执行《作文批改规则.md》所规定的内容，版式照《标准模式批改.docx》，遇见《作文批改规则.md》未明确规定的事项，可以从《标准模式批改.docx》参照模仿。因为现在是网页版无法输出文件，请你给出 Python 脚本文件我自己去执行，其他规则不变。
 
-    注意：《标准模式批改.docx》只作版式与笔调的参照，其中的人物、题目、学生作文、批改意见一律不得沿用；题目和学生作文一律以上传的那两个文件为准。
+        注意：《标准模式批改.docx》只作版式与笔调的参照，其中的人物、题目、学生作文、批改意见一律不得沿用；题目和学生作文一律以上传的文件为准。
 
-    补充说明（我的运行环境）：Python 3.12，已装好 python-docx，没有其他第三方库，请不要 import pandas、matplotlib、openpyxl 之类；脚本要能一次跑完，不要用 input() 等待键盘输入；最后请用 doc.save('文件名.docx') 保存。
+        补充说明（我的运行环境）：Python 3.12，已装好 python-docx，没有其他第三方库，请不要 import pandas、matplotlib、openpyxl 之类；脚本要能一次跑完，不要用 input() 等待键盘输入；最后请用 doc.save('文件名.docx') 保存。
 
-    【格式要求，非常重要】Python代码的最后一个行必须原样写上这一行注释（#前不要有任何空格）：
-    # ===ESSAY-END===
-    这一行必须是代码框里的最后一行，它之后不能再有任何代码。这是我用来判断代码是否输出完整的标记，请务必保留、不要改动、不要省略。
+        【格式要求，非常重要】Python代码的最后一个行必须原样写上这一行注释（#前不要有任何空格）：
+        # ===ESSAY-END===
+        这一行必须是代码框里的最后一行，它之后不能再有任何代码。这是我用来判断代码是否输出完整的标记，请务必保留、不要改动、不要省略。
 
-    【收尾说明，同样重要】代码块结束之后，请再写一段简短的中文说明，**至少 3 行、3 行或更多**，讲清楚：这份批改稿有哪几个部分、哪些是红色需改处、哪些是蓝色〔〕编号、纠错与补充意见各几条、终稿多少词。这段说明必须写在代码块外面，不要写进代码里。
-    """
+        【收尾说明，同样重要】代码块结束之后，请再写一段简短的中文说明，**至少 3 行、3 行或更多**，讲清楚：这份批改稿有哪几个部分、哪些是红色需改处、哪些是蓝色〔〕编号、纠错与补充意见各几条、终稿多少词。这段说明必须写在代码块外面，不要写进代码里。
+        """
+    }
 
     /// AI 必须在代码末尾打上的结束标记
     static let endMarker = "# ===ESSAY-END==="
@@ -35,7 +48,33 @@ extension AppState {
         case "docx": return docxMime
         case "doc": return "application/msword"
         case "md": return "text/markdown"
+        case "pdf": return "application/pdf"
+        case "png": return "image/png"
+        case "jpg", "jpeg": return "image/jpeg"
         default: return "application/octet-stream"
+        }
+    }
+
+    /// 重名附件补序号：`作文.png` / `作文-2.png`。
+    /// 两个原因：一是附件条上分不清谁是谁；二是 `checkNames` 用子串匹配，
+    /// 重名会让两个文件互相顶掉（一个到了就当成都到了）。
+    /// **只改送给网页的名字，磁盘上的文件一个字节都不动。**
+    private func dedupeNames(_ items: [FilePayload]) -> [FilePayload] {
+        var used = Set<String>()
+        return items.map { item in
+            var copy = item
+            let ns = item.name as NSString
+            let ext = ns.pathExtension
+            let base = ns.deletingPathExtension
+            var candidate = item.name
+            var n = 2
+            while used.contains(candidate.lowercased()) {
+                candidate = ext.isEmpty ? "\(base)-\(n)" : "\(base)-\(n).\(ext)"
+                n += 1
+            }
+            used.insert(candidate.lowercased())
+            copy.name = candidate
+            return copy
         }
     }
 
@@ -48,9 +87,10 @@ extension AppState {
         progressLines = []
         docx = .idle
 
-        // 先把两个文件拷到局部变量，再把上传框清空 —— 顺序反了就拿不到文件了。
-        let topic = topicURL
-        let essay = essayURL
+        // 先把两个框里的文件拷到局部变量，再把上传框清空 —— 顺序反了就拿不到文件了。
+        // 一个框里可能有好几个文件（作文常是 1–3 张图片），所以拷的是数组不是单个 URL。
+        let topicFiles = items(for: .topic).compactMap { $0.url }
+        let essayFiles = items(for: .essay).compactMap { $0.url }
         let auto = autoSend
         submitAndClearUploads()
 
@@ -69,7 +109,7 @@ extension AppState {
             var script: String?
             var failure: String?
             do {
-                script = try self.pipeline(topic: topic, essay: essay, auto: auto)
+                script = try self.pipeline(topicFiles: topicFiles, essayFiles: essayFiles, auto: auto)
             } catch {
                 failure = error.localizedDescription
                 self.log("✗ \(failure ?? "")")
@@ -83,12 +123,11 @@ extension AppState {
                     self.restoreHeldFiles()
                     self.say(friendly,
                              detail: aborted
-                                ? "批改稿没有生成，两份文档已放回上传框，可直接重试"
+                                ? "批改稿没有生成，文件已放回上传框，可直接重试"
                                 : failure,
                              running: false,
                              tone: aborted ? .idle : .error)
                     if !aborted {
-                        self.lastFailure = failure
                         self.docx = .failed(failure)
                     }
                     return
@@ -98,7 +137,7 @@ extension AppState {
                 } else if auto {
                     self.restoreHeldFiles()
                     self.say("AI 回答完了，但没找到脚本",
-                             detail: "两份文档已放回上传框，可以再试一次",
+                             detail: "文件已放回上传框，可以再试一次",
                              running: false, tone: .error)
                 }
             }
@@ -108,8 +147,8 @@ extension AppState {
     // MARK: - 主流程
 
     @discardableResult
-    private func pipeline(topic: URL?, essay: URL?, auto: Bool) throws -> String? {
-        guard let topic = topic, let essay = essay else {
+    private func pipeline(topicFiles: [URL], essayFiles: [URL], auto: Bool) throws -> String? {
+        guard !topicFiles.isEmpty, !essayFiles.isEmpty else {
             throw BridgeError.failed("文件没选齐")
         }
         guard let ruleURL = AppState.bundledRule,
@@ -117,36 +156,54 @@ extension AppState {
             throw BridgeError.failed("App 内置的规则文件丢了，请重新安装 App")
         }
 
+        // 规则、模板固定打头，后面依次是题目组的文件、作文组的文件。
+        // 顺序不用刻意告诉 AI（它按内容认），但保持稳定便于排查日志。
         var uploads = [
-            UploadItem(url: ruleURL, name: "作文批改规则.md", mime: "text/markdown"),
-            UploadItem(url: tplURL, name: "标准模式批改.docx", mime: docxMime),
-            UploadItem(url: topic, name: topic.lastPathComponent, mime: mimeFor(topic)),
-            UploadItem(url: essay, name: essay.lastPathComponent, mime: mimeFor(essay))
+            FilePayload(url: ruleURL, name: "作文批改规则.md", mime: "text/markdown"),
+            FilePayload(url: tplURL, name: "标准模式批改.docx", mime: docxMime)
         ]
-        var prompt = AppState.promptText
+        uploads += topicFiles.map { FilePayload(url: $0, name: $0.lastPathComponent, mime: mimeFor($0)) }
+        uploads += essayFiles.map { FilePayload(url: $0, name: $0.lastPathComponent, mime: mimeFor($0)) }
+        // 不同目录下的同名文件（比如两张都叫「IMG_0001.jpg」）在附件条里分不清，
+        // 而且 checkNames 是按子串匹配的，重名会互相顶掉 —— 重名时补个序号。
+        uploads = dedupeNames(uploads)
 
-        // 0. 先开一个新对话，避免上一轮的附件和上下文残留。
-        // 优先点页面上的「开启新对话」按钮（快、不重载）；万一页面改版、按钮文案变了，
-        // JS 会返回 NOT_FOUND，这时退回根地址重载 —— https://chat.deepseek.com/ 后面不带任何
-        // 对话 id，重载出来必然是空白新对话。不检查返回值就会静默复用上一轮的上下文。
-        let newChat = try self.js(Scripts.newChat)
-        log("新对话：\(newChat)")
-        if newChat.contains("NOT_FOUND") {
-            log("没找到「开启新对话」按钮，改为重载根地址")
-            say("正在准备新对话…", detail: "重置页面中，稍等几秒", running: true)
-            // loadDeepSeek 里有 NSWindow 操作，必须回主线程
-            DispatchQueue.main.async { [weak self] in self?.browser.loadDeepSeek(force: true) }
-            var waited = 0.0
-            while !browser.isPageLoaded && waited < 25 {
-                Thread.sleep(forTimeInterval: 0.5)
-                waited += 0.5
-            }
-            log("页面重载完成，用时 \(waited) 秒")
-            // 文档加载完不等于 SPA 渲染完，再给输入框一点时间
-            Thread.sleep(forTimeInterval: 2.0)
-        } else {
-            Thread.sleep(forTimeInterval: 1.5)
+        var prompt = AppState.promptText(fileCount: uploads.count)
+
+        // 0. 每次运行都重载根地址，保证是空白新对话。
+        //
+        // 以前是「先点页面上的『开启新对话』按钮，点不到才重载」。实测从 v0.12 到 v0.20，
+        // 那个按钮**一次都没点中过**（日志里永远是 NOT_FOUND，包括加了 aria-label 兜底之后），
+        // 每次都是走重载兜底 —— 也就是说「点按钮」这条路从来没生效，只是在浪费时间：
+        // 两次无效的 JS 往返 + 0.8 秒空等 + 两行让人以为出错的 NOT_FOUND。
+        // 根地址 https://chat.deepseek.com/ 后面不带任何会话 id，重载出来必然是空白对话，
+        // 这条路反而更硬：不依赖 DOM、不怕改版。代价是每次多 2~4 秒，相对整轮几分钟不算什么。
+        say("正在准备新对话…", detail: "重置页面中，稍等几秒", running: true)
+        // loadDeepSeek 里有 NSWindow 操作，必须回主线程。但它是异步的，
+        // 等它跑起来再轮询标志的话，读到的是上一轮的 true —— 循环立刻退出，
+        // 日志里就是「用时 0.0 秒」，等于没等。所以先把标志同步打回 false 再派发。
+        browser.markReloading()
+        DispatchQueue.main.async { [weak self] in self?.browser.loadDeepSeek(force: true) }
+        var waited = 0.0
+        while !browser.isPageLoaded && waited < 25 {
+            Thread.sleep(forTimeInterval: 0.25)
+            waited += 0.25
         }
+        log("页面重载：\(String(format: "%.1f", waited)) 秒")
+        if !browser.isPageLoaded {
+            log("⚠️ 25 秒内没等到页面加载完成，继续尝试（后面探针会暴露真实状态）")
+        }
+
+        // didFinish 只说明文档到了，SPA 还没渲染完。以前是固定睡 2 秒赌一把，
+        // 现在直接等输入框真的出现 —— 快的时候几百毫秒就过，慢的时候也不会白等。
+        var ready = 0.0
+        while ready < 10 {
+            let p = (try? self.js(Scripts.probeComposer)) ?? ""
+            if p.contains("\"textarea\":true") { break }
+            Thread.sleep(forTimeInterval: 0.4)
+            ready += 0.4
+        }
+        if ready > 0 { log("等输入框出现：\(String(format: "%.1f", ready)) 秒") }
 
         // 1. 探针：确认输入框和文件框的结构
         // 注：深度思考+智能搜索已在登录成功时由 ensureDeepSeekModes() 处理，
@@ -158,9 +215,11 @@ extension AppState {
         _ = try self.js(Scripts.resetBuffer)
 
         // 3. 把字节灌进页面
+        var totalBytes = 0
         for (index, item) in uploads.enumerated() {
             try checkStop()
             let data = try Data(contentsOf: item.url)
+            totalBytes += data.count
             try feed(index: index, data: data)
             log("载入 \(item.name)（\(data.count / 1024) KB）")
             say("正在上传文件…",
@@ -174,13 +233,20 @@ extension AppState {
             ["idx": index, "name": item.name, "type": item.mime]
         }
         let injected = try self.js(Scripts.commitFiles(defsJSON: jsonString(defs)))
+        // 形如 INPUT:5/0 —— 前面是交给网页的个数，后面是事件处理完还剩几个。
+        // 后一个数常见是 0：网页接手后会把 input 清空，属正常，别当成注入失败。
         log("注入：\(injected)")
-        say("正在把文件交给 AI…", detail: "一共 4 个文件：规则、模板、题目、作文",
+        say("正在把文件交给 AI…",
+            detail: "一共 \(uploads.count) 个文件：规则、模板、题目 \(topicFiles.count) 个、作文 \(essayFiles.count) 个",
             fraction: 0.55, running: true)
 
-        // 4. 等附件条渲染出来
-        var missing = try waitFor(names: uploads.map { $0.name }, timeout: 25)
-        log(missing.isEmpty ? "4 个附件已就位" : "还没出现：\(missing.joined(separator: "、"))")
+        // 4. 等附件条渲染出来。
+        // 等待时间按体积给：几张手机拍的作文照片能有十几 MB，固定 25 秒不够用。
+        let waitSeconds = min(120, max(25, 15 + Double(totalBytes) / 1_000_000 * 2.0))
+        var missing = try waitFor(expected(uploads), timeout: waitSeconds)
+        log(missing.isEmpty
+            ? "\(uploads.count) 个附件已就位（\(Int(totalBytes / 1024)) KB）"
+            : "还没出现：\(missing.joined(separator: "、"))")
 
         // 4.1 .md 被拒收就改 .txt 重试，并同步替换提示词里的文件名
         if missing.contains("作文批改规则.md") {
@@ -195,7 +261,7 @@ extension AppState {
                 ["idx": 0, "name": uploads[0].name, "type": uploads[0].mime]
             ]
             _ = try self.js(Scripts.commitFiles(defsJSON: jsonString(retry)))
-            let still = try waitFor(names: [uploads[0].name], timeout: 20)
+            let still = try waitFor([(name: uploads[0].name, isImage: false)], timeout: 20)
             if !still.isEmpty {
                 throw BridgeError.failed("规则文件传不上去，DeepSeek 可能既不收 .md 也不收 .txt")
             }
@@ -207,12 +273,11 @@ extension AppState {
         }
         say("文件都传上去了", detail: "正在把题目和要求发给 AI", fraction: 0.68, running: true)
 
-        // 5. 填提示词
-        let filled = try self.js(Scripts.fillText(textJSON: jsonString(prompt)))
-        guard filled.hasPrefix("OK") else {
-            throw BridgeError.failed("文字填不进去：\(filled)")
-        }
-        log("提示词已填入（\(filled.dropFirst(3)) 字）")
+        // 5. 先清空输入框，再填提示词。
+        // 网页版收到附件后会把文件名当文字塞进输入框（截图见 HANDOVER §6.9），
+        // 不清的话提示词前面会挂着「IMG_3435.jpeg 未标题-1.png」这一串。
+        // 顺序必须是「先等附件就位 → 再清 → 再填」：清早了网页还会补回来。
+        _ = try fillPrompt(prompt)
 
         // 6. 发送
         if auto {
@@ -221,6 +286,13 @@ extension AppState {
                 say("马上开始生成…", detail: "\(second) 秒后自动发送，不用你操作",
                     fraction: 0.75, running: true)
                 Thread.sleep(forTimeInterval: 1.0)
+            }
+            // 发送前再确认一次：万一这几秒里网页又把文件名补进输入框，重填一遍。
+            // 只做回读比对，一致就不动输入框（无谓地清空重填反而多一次竞态）。
+            if try self.js(Scripts.readText).trimmingCharacters(in: .whitespacesAndNewlines)
+                != prompt.trimmingCharacters(in: .whitespacesAndNewlines) {
+                log("发送前回读不一致，重填提示词")
+                _ = try fillPrompt(prompt)
             }
             let sent = try self.js(Scripts.sendNow)
             log("发送结果：\(sent)")
@@ -236,6 +308,41 @@ extension AppState {
         }
     }
 
+    /// 清空输入框 → 填入提示词 → 回读校验。对不上就再来一次（最多两次）。
+    /// 回读这一步是关键：网页插入文件名是异步的，只靠「填完就当成功」会漏。
+    /// 返回 true 表示回读与提示词完全一致。
+    @discardableResult
+    private func fillPrompt(_ prompt: String) throws -> Bool {
+        for attempt in 1...2 {
+            _ = try self.js(Scripts.clearText)
+            // 清完稍等一下，让网页那边的 React 状态落定，否则它可能把我们填的又盖掉
+            Thread.sleep(forTimeInterval: attempt == 1 ? 0.35 : 0.8)
+
+            let filled = try self.js(Scripts.fillText(textJSON: jsonString(prompt)))
+            guard filled.hasPrefix("OK") else {
+                throw BridgeError.failed("文字填不进去：\(filled)")
+            }
+
+            let back = try self.js(Scripts.readText)
+            if sameText(back, prompt) {
+                log("提示词已填入并回读一致（\(prompt.count) 字）")
+                return true
+            }
+            log("第 \(attempt) 次填入后回读不一致：输入框 \(back.count) 字 / 应为 \(prompt.count) 字，清空重填")
+        }
+        // 两次都对不上就不再硬失败 —— 内容已经在框里，多出来的无非是文件名，AI 自己能认出来
+        log("⚠️ 提示词回读仍不一致，按当前内容发送")
+        say("提示词已填入", detail: "输入框内容和预期略有出入，仍按此发送", fraction: 0.7, running: true)
+        return false
+    }
+
+    /// 回读比对用的相等判断。只忽略首尾空白 —— 输入框偶尔会多一个尾随换行，
+    /// 那不是问题，不该为它触发一次重填。
+    private func sameText(_ a: String, _ b: String) -> Bool {
+        a.trimmingCharacters(in: .whitespacesAndNewlines)
+            == b.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
     // MARK: - 等回复 / 抓代码
 
     /// 轮询回复区，直到内容不再变化；期间自动点「继续」
@@ -243,8 +350,7 @@ extension AppState {
     private func waitForReply(timeout: TimeInterval = 240) throws -> String? {
         // 用户要求：这个规模 10 分钟就是上限，10 分钟一到直接判失败，不再顺延。
         // 上一版把总上限放到 30 分钟，结果一次成功跑了 15 分钟，太长了。
-        let hardDeadline = Date().addingTimeInterval(600)
-        var deadline = hardDeadline
+        let deadline = Date().addingTimeInterval(600)
         // 发送后先给页面一点时间开始动
         Thread.sleep(forTimeInterval: 3.0)
 
@@ -306,7 +412,7 @@ extension AppState {
                 endMarkRounds = 0
             }
 
-            // —— 统一播报（用户要求）：内部每轮判断增长，但状态框每 5 秒只报下面这一句，持续不断。
+            // —— 统一播报（用户要求）：内部每轮判断增长，但状态框每轮只报下面这一句，持续不断。
             // 不再有“正在写 / 正在读 / 快写完了”几套文案，也不再另起多套节奏。
             // 字数涨没涨，一看这句里的数字就知道；分段提示在下面点“继续”时会立刻报一次，
             // 下一轮播报（5 秒后）再接上这句，不会立刻盖掉分段提示。
@@ -404,19 +510,20 @@ extension AppState {
             // 【兜底判定】2026-10-25 的教训：旧代码“稳定 10 秒就按完成处理”，
             // 深度思考的思考间隙很容易超过 10 秒，结果抓到写了一半、字符串都没闭合的
             // 截断脚本（16216 字，第 368 行 SyntaxError），然后 Python 报错收场。
-            // 新规则：稳定满 60 秒（5 秒一轮，共 12 轮），且必须同时有收尾标志（.save / main），才按完成处理；
-            // 稳定满 60 秒但没有收尾标志，说明 AI 可能还在思考、也可能停了，
-            // 但绝不擅自执行一段没收尾的代码，继续等到总上限，宁可报“没等到完整回答”，
-            // 也不把截断脚本拿去执行。
+            //
+            // 2026-10-27 用户定：**不必等 60 秒**。理由是到目前为止结束标志从未失手，
+            // 60 秒纯属白等。改成「一轮没长 + 有收尾标志」就收工（循环 3 秒一轮，即约 3 秒）。
+            // 仍保留两条底线：① 没有收尾标志时绝不执行，继续等；② 总上限 10 分钟不变。
             if blocks > 0 {
                 if textLen == lastTextLen && codeLen == lastCodeLen {
                     stableRounds += 1
-                    if stableRounds >= 12 {
-                        if looksComplete {
-                            log("内容稳定 60 秒且有收尾标志，按完成处理")
-                            say("脚本看起来写完了", detail: "正在把它取回来…", running: true)
-                            return try grabScript()
-                        }
+                    if looksComplete && stableRounds >= 1 {
+                        log("内容 3 秒未变且有收尾标志，按完成处理")
+                        say("脚本看起来写完了", detail: "正在把它取回来…", running: true)
+                        return try grabScript()
+                    }
+                    // 没有收尾标志：攒够 60 秒（20 轮 × 3 秒）提示一次，然后继续等
+                    if stableRounds >= 20 {
                         log("内容稳定 60 秒但未见收尾标志，继续等，不擅自执行截断脚本")
                         stableRounds = 0
                     }
@@ -434,10 +541,12 @@ extension AppState {
                 stableRounds = 0
             }
 
-            // 思考提示已统一移到循环顶部，每 5 秒报一次，这里不再另起一套节奏。
+            // 思考提示已统一移到循环顶部，每轮报一次，这里不再另起一套节奏。
             lastTextLen = textLen
             lastCodeLen = codeLen
-            Thread.sleep(forTimeInterval: 5.0)
+            // 3 秒一轮（原来是 5 秒）：兜底判定要「一轮没长」≈3 秒就收工，
+            // 轮间隔必须跟着缩，否则「3 秒」实际是 5 秒。轮数阈值也按 3 秒重算过。
+            Thread.sleep(forTimeInterval: 3.0)
         }
 
         throw BridgeError.failed("等了 10 分钟仍未等到完整回答（没有结束标记、也没有收尾标志），没有擅自执行截断的脚本，请再试一次。")
@@ -507,7 +616,7 @@ extension AppState {
             log("代码块解码失败")
             return nil
         }
-        log("抓到 \(blocks.count) 个代码块，总长 \(blocks.reduce(0) { $0 + $1.count }) 字符")
+        log("抓到 \(blocks.count) 个代码块，原文总长 \(blocks.reduce(0) { $0 + $1.count }) 字符")
 
         let joined = blocks.map { "```python\n\($0)\n```" }.joined(separator: "\n\n")
         return ScriptExtractor.extract(from: joined)
@@ -533,12 +642,19 @@ extension AppState {
         }
     }
 
-    private func waitFor(names: [String], timeout: TimeInterval) throws -> [String] {
+    /// 把附件清单翻译成探针要的形状：名字 + 是不是图片
+    private func expected(_ items: [FilePayload]) -> [(name: String, isImage: Bool)] {
+        items.map { (name: $0.name, isImage: $0.mime.hasPrefix("image/")) }
+    }
+
+    private func waitFor(_ files: [(name: String, isImage: Bool)],
+                         timeout: TimeInterval) throws -> [String] {
         let deadline = Date().addingTimeInterval(timeout)
-        var missing = names
+        let payload = jsonString(files.map { ["n": $0.name, "i": $0.isImage ? 1 : 0] })
+        var missing = files.map { $0.name }
         while Date() < deadline {
             if stopRequested { throw BridgeError.failed("已中止") }
-            let raw = try self.js(Scripts.checkNames(namesJSON: jsonString(names)))
+            let raw = try self.js(Scripts.checkNames(filesJSON: payload))
             if let data = raw.data(using: .utf8),
                let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
                let list = obj["missing"] as? [String] {

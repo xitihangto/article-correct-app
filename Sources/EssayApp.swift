@@ -1,5 +1,7 @@
 import SwiftUI
 import AppKit
+import QuickLookUI
+import PDFKit
 
 // MARK: - 品牌色
 
@@ -78,11 +80,34 @@ struct EssayApp: App {
             print("bundle   = \(Bundle.main.bundlePath)")
             print("rule     = \(AppState.bundledRule?.path ?? "❌ 未找到")")
             print("template = \(AppState.bundledTemplate?.path ?? "❌ 未找到")")
-            print("docTypes = \(AppState.docTypes.map { $0.identifier }.joined(separator: ", "))")
+            print("docTypes = \(AppState.uploadTypes.map { $0.identifier }.joined(separator: ", "))")
             let rule = AppState.bundledRule.flatMap { try? String(contentsOf: $0, encoding: .utf8) }
             print("ruleHead = \(rule?.prefix(40).replacingOccurrences(of: "\n", with: " ") ?? "❌ 读不出")")
             print("python   = \(PythonRunner.executable?.path ?? "❌ 未找到")")
             print("pySize   = \(PythonRunner.sizeDescription)")
+            exit(0)
+        }
+
+        // 自检：剪贴板图片落盘（--pastetest）
+        if CommandLine.arguments.contains("--pastetest") {
+            let image = AppState.demoImages(1)[0]
+            let item = UploadItem(image: image, name: "剪贴板图片1")
+            let exists = item.url.map { FileManager.default.fileExists(atPath: $0.path) } ?? false
+            let line = "paste url=\(item.url?.path ?? "nil")  name=\(item.name)  size=\(item.sizeKB)KB  exists=\(exists)\n"
+            FileHandle.standardError.write(Data(line.utf8))
+            exit(exists ? 0 : 1)
+        }
+
+        // 自检：提示词拼装（--prompttest）——不用真跑一遍也能看 AI 收到什么
+        if CommandLine.arguments.contains("--prompttest") {
+            var out = ""
+            for n in [4, 6] {
+                let text = AppState.promptText(fileCount: n)
+                out += "===== \(n) 个文件 =====\n\(text)\n"
+                out += "首句: \(text.split(separator: "\n")[0])\n"
+                out += "含结束标记: \(text.contains(AppState.endMarker))\n\n"
+            }
+            FileHandle.standardError.write(Data(out.utf8))
             exit(0)
         }
 
@@ -233,7 +258,11 @@ struct ContentView: View {
     @State private var loginHover = false
     @State private var loginBreathing = false
     @State private var recheckHover = false
-    @State private var footerHover = false
+    @State private var logoutHover = false
+    /// ⌘V 监听器（等待粘贴态才接管）
+    @State private var pasteMonitor: Any?
+    /// 鼠标抬起监听器：点框外时退出等待粘贴
+    @State private var clickMonitor: Any?
 
     var body: some View {
         ZStack {
@@ -243,15 +272,14 @@ struct ContentView: View {
                     titleCard
                     UploadCard(slot: .topic,
                                title: "上传作文题目",
-                               subtitle: "支持 .doc / .docx，含写作要求与要点提示")
+                               subtitle: "支持 doc / docx / pdf 与图片，含写作要求与要点提示")
                     UploadCard(slot: .essay,
                                title: "上传学生作文",
-                               subtitle: "支持 .doc / .docx，含手写稿或打字稿全文")
+                               subtitle: "支持 doc / docx / pdf 与图片，含手写稿或打字稿全文")
                     loginLine
                     generateButton
                     ProgressCard()
                     WordCard()
-                    footer
                 }
                 .padding(.horizontal, 22)
                 .padding(.top, 18)
@@ -272,6 +300,13 @@ struct ContentView: View {
                     window.delegate = ExitConfirmWindowDelegate.shared
                 }
             }
+            // 开发用：--preview /path/to/file 启动即打开该文件的预览（验文档渲染最省事）
+            if let idx = CommandLine.arguments.firstIndex(of: "--preview"),
+               idx + 1 < CommandLine.arguments.count,
+               let item = UploadItem(url: URL(fileURLWithPath: CommandLine.arguments[idx + 1])) {
+                state.previewItem = item
+                return
+            }
             // 开发用：--uidemo / --uidemo2 只改界面状态，方便截图检查视觉
             if CommandLine.arguments.contains("--uidemo") {
                 state.applyUIDemo(step: 1)
@@ -285,17 +320,37 @@ struct ContentView: View {
                 state.applyUIDemo(step: 5)
             } else if CommandLine.arguments.contains("--uidemo6") {
                 state.applyUIDemo(step: 6)
+            } else if CommandLine.arguments.contains("--uidemo7") {
+                state.applyUIDemo(step: 7)
+            } else if CommandLine.arguments.contains("--uidemo8") {
+                state.applyUIDemo(step: 8)
+            } else if CommandLine.arguments.contains("--uidemo9") {
+                state.applyUIDemo(step: 9)
+            } else if CommandLine.arguments.contains("--logdemo") {
+                state.applyLogDemo()
             } else if CommandLine.arguments.contains("--logintest") {
                 state.runLoginSelfTest()
             } else if CommandLine.arguments.contains("--modeprobe") {
                 state.runModeProbe()
             }
         }
-        .sheet(isPresented: $state.showOutputPanel) {
-            OutputSheet().environmentObject(state)
-        }
         .onReceive(NotificationCenter.default.publisher(for: .essayAppConfirmExit)) { _ in
             showExitConfirm = true
+        }
+        .overlay {
+            // 卡片放大预览：铺满整个窗口，压暗一点点，点任意处关闭。
+            // 放在两个确认框之前，弹确认框时预览会被盖住。
+            if let item = state.previewItem {
+                PreviewPanel(item: item) { state.closePreview() }
+            }
+        }
+        .overlay(alignment: .top) {
+            // 运行日志：只压暗上半屏，底部 Word 卡（含「详情」按钮）留出来。
+            // 面板绝不能盖住自己的开关 —— 盖住了用户就没法再点一次收起来。
+            if state.showLog {
+                LogPanel(onClose: { state.closeLog() })
+                    .transition(.opacity.combined(with: .scale(scale: 0.985, anchor: .top)))
+            }
         }
         .overlay {
             if showExitConfirm {
@@ -306,6 +361,73 @@ struct ContentView: View {
             if showLogoutConfirm {
                 logoutConfirmOverlay
             }
+        }
+        .overlay(alignment: .top) {
+            // 兜底：没指明哪个框的提示才放窗口顶部。上传框相关的提示都落在框中心（见 UploadCard）。
+            if state.toastSlot == nil, let toast = state.toast {
+                ToastBar(text: toast)
+                    .padding(.top, 12)
+                    .transition(.move(edge: .top).combined(with: .opacity))
+            }
+        }
+        .animation(.easeOut(duration: 0.2), value: state.toast)
+        .onAppear { installPasteMonitor() }
+        .onDisappear {
+            if let monitor = pasteMonitor { NSEvent.removeMonitor(monitor) }
+            pasteMonitor = nil
+            if let monitor = clickMonitor { NSEvent.removeMonitor(monitor) }
+            clickMonitor = nil
+        }
+    }
+
+    /// ⌘V 监听 + 「点框外退出等待粘贴」。
+    ///
+    /// 粘贴：只有某个上传框处于「等待粘贴」状态时才接管，其余情况原样放行 ——
+    /// 不能把别处的正常粘贴吃掉。Esc 顺手退出等待粘贴态（不吞事件，免得影响别的弹窗取消）。
+    ///
+    /// 取消：用户 2026-10-27 明确「框内再点不取消，只有点框外（必须在 app 范围内）才取消」，
+    /// 后来补一句「左键连续点框内保持激活，右键也一样」。
+    /// 这里不判断坐标 —— 判断坐标要处理 SwiftUI global 空间和 NSEvent 窗口空间的 y 轴翻转，
+    /// 平台行为一变就会「点框内反而取消」。改成**票据制**：框内任何点击都会留一张票
+    /// （`state.insideClickTicket`），mouseUp 之后异步看一眼 —— 有票作废票据、没票才取消。
+    /// 用 local monitor 而不是 SwiftUI 手势：只有发给本 App 的事件才进来，
+    /// 「点别的 app 不取消」这条天然满足。
+    private func installPasteMonitor() {
+        guard pasteMonitor == nil else { return }
+        pasteMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+            // Esc：先关日志，再关预览，最后退等待粘贴（都不吞事件，免得影响别的弹窗取消）
+            if event.keyCode == 53 {
+                if state.showLog {
+                    state.closeLog()
+                } else if state.previewItem != nil {
+                    state.closePreview()
+                } else if state.pasteArmed != nil {
+                    state.pasteArmed = nil
+                    state.closePasteMenu()
+                }
+                return event
+            }
+            guard let slot = state.pasteArmed,
+                  event.modifierFlags.contains(.command),
+                  event.charactersIgnoringModifiers?.lowercased() == "v"
+            else { return event }
+            state.pasteFromClipboard(into: slot)
+            return nil
+        }
+
+        clickMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseUp, .rightMouseUp]) { event in
+            guard state.pasteArmed != nil else { return event }
+            // 顺序很关键：local monitor 在事件派发给视图**之前**跑，框自己的 onTapGesture 在**之后**跑。
+            // 所以不能在派发前就判（那时票还没发），要推到下一轮 runloop —— 那时框内点击已经留过票了。
+            DispatchQueue.main.async {
+                if state.insideClickTicket {
+                    state.insideClickTicket = false     // 这一下点在框内，留着
+                } else if state.pasteArmed != nil {
+                    state.pasteArmed = nil              // 点在框外，取消
+                    state.closePasteMenu()              // 右键小菜单跟着一起收
+                }
+            }
+            return event
         }
     }
 
@@ -379,7 +501,7 @@ struct ContentView: View {
         ZStack {
             Color.black.opacity(0.35)
             VStack(spacing: 14) {
-                Text("退出 DeepSeek 账号？")
+                Text("登出 DeepSeek 账号？")
                     .font(.system(size: 16, weight: .semibold))
                 Text("会清掉本机保存的登录信息，然后重新打开登录页。之后需要重新扫码或输入账号密码登录。")
                     .font(.system(size: 13))
@@ -393,7 +515,7 @@ struct ContentView: View {
                         showLogoutConfirm = false
                         state.logoutDeepSeek()
                     } label: {
-                        Text("退出并重新登录")
+                        Text("登出并重新登录")
                             .font(.system(size: 13.5, weight: .semibold))
                             .frame(maxWidth: .infinity)
                             .padding(.vertical, 6)
@@ -441,7 +563,7 @@ struct ContentView: View {
                                    startPoint: .leading, endPoint: .trailing)
                 )
 
-            Text("上传作文题目与学生作文两份 Word 文档，自动生成红笔批注、纠错清单与升格终稿。生成约需 1–3 分钟。")
+            Text("上传作文题目与学生作文，Word、PDF 或图片均可，自动生成红笔批注、纠错清单与升格终稿。生成约需 1–3 分钟。")
                 .font(.system(size: 12))
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
@@ -558,9 +680,37 @@ struct ContentView: View {
                 .onDisappear { loginBreathing = false }
                 .help("只在登录时会弹出窗口，登录成功后自动收起")
             }
+
+            // 双绿灯（已登录 + 模式已激活）之后 0.5 秒出现：登出 DeepSeek。
+            // 它接的是原来右下角「⋯」菜单里的「退出账号」，那个菜单连同底部状态行
+            // 一起删掉了（用户 2026-10-27 要求），所以这是现在唯一的登出入口。
+            // 点它只弹确认框，真正清登录态在确认之后。
+            if state.logoutReady {
+                Button { showLogoutConfirm = true } label: {
+                    Text("登出 DeepSeek")
+                        // 不加粗：用户 2026-10-27 明确要求
+                        .font(.system(size: 12))
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 6)
+                        .trialGlassCapsule(fallbackFill: Color.brandBlue.opacity(0.13))
+                        .overlay(Capsule().fill(Color.brandBlue.opacity(logoutHover ? 0.10 : 0)))
+                        .foregroundStyle(Color.brandBlue)
+                }
+                .buttonStyle(.plain)
+                .handCursor()
+                .onHover { logoutHover = $0 }
+                .animation(.easeOut(duration: 0.15), value: logoutHover)
+                // 生成中禁点：退出登录会清掉整个网页数据，正在跑的批改直接废掉
+                .disabled(state.isRunning)
+                .help("登出 DeepSeek 账号，会清掉本机保存的登录信息")
+                .transition(.opacity)
+            }
         }
         .padding(.horizontal, 4)
         .frame(height: 30)
+        // 「登出 DeepSeek」按钮出现 / 消失用 0.5 秒淡入淡出。
+        // 只绑 logoutReady，别给它挂别的动画。
+        .animation(.easeOut(duration: 0.5), value: state.logoutReady)
     }
 
     // MARK: 主按钮
@@ -616,37 +766,6 @@ struct ContentView: View {
         }
         return AnyShapeStyle(Color.secondary.opacity(0.16))
     }
-
-    // MARK: 页脚
-
-    private var footer: some View {
-        HStack(spacing: 9) {
-            Circle()
-                .fill(state.pythonReady ? Color.green : Color.red)
-                .frame(width: 6, height: 6)
-            Text(state.pythonReady ? "运行环境已就绪" : "运行环境缺失，无法生成批改稿")
-                .font(.system(size: 10))
-                .foregroundStyle(.tertiary)
-            Spacer()
-            Menu {
-                Button("退出 DeepSeek 账号…") { showLogoutConfirm = true }
-                    .disabled(!state.login.isLoggedIn)
-            } label: {
-                Image(systemName: "ellipsis.circle")
-                    .font(.system(size: 13))
-                    .foregroundStyle(footerHover ? Color.primary : Color.secondary)
-            }
-            .menuStyle(.borderlessButton)
-            .menuIndicator(.hidden)
-            .frame(width: 20)
-            .handCursor()
-            .onHover { footerHover = $0 && !state.isRunning }
-            .animation(.easeOut(duration: 0.15), value: footerHover)
-            .disabled(state.isRunning)
-        }
-        .padding(.horizontal, 4)
-        .padding(.top, 2)
-    }
 }
 
 // MARK: - 背景
@@ -690,121 +809,788 @@ struct Backdrop: View {
 
 // MARK: - 上传卡片
 
-/// 整块可点：点框里任何地方都会打开选文件面板。
-/// 选中后右上角浮一个圆形叉，点它移除（它在 ZStack 上层，所以不会被下面的大按钮吃掉）。
+/// 新版上传框（v0.18）。题目框和作文框是同一套排版 —— 用户 2026-10-27 以截图定的基准：
+///
+///     ┌──────────────────────────────────────────────────┐
+///     │ 上传作文题目                按 ⌘V 粘贴，点框外取消   │ ← 激活时居中，覆盖在两行之间
+///     │ 支持 doc / docx / pdf 与图片，含…，word 或 pdf 文档最多 1 个，图片最多 3 张 │
+///     │ ┌───┐ 点击此处可粘贴   ┌───────┐ ┌───────┐        │ ← 提示只在空框时出现
+///     │ │ + │                  │ 卡片 ⓧ │ │ 卡片 ⓧ │        │
+///     │ └───┘                  └───────┘ └───────┘        │
+///     └──────────────────────────────────────────────────┘
+///
+/// 光标规矩（用户明确要求）：**只有加号是手型**，其余区域一律箭头；
+/// 但其余区域按下会把整个框切到「等待粘贴」态 —— 细蓝边 + 浅蓝底 + 第一行行末出现蓝色提示。
+/// 取消只有两条路（用户 2026-10-27）：**点框外**（见 `installPasteMonitor`）或 Esc。
+/// **框内再点不会取消**，这是用户特意要求的 —— 以前「再点一下取消」太容易误触。
+///
+/// 三个位置**恒定三等分**（用户 2026-10-27 明确：预览卡片不能占一整行，
+/// 占整行会把框撑高、620×720 的固定窗口就装不下了），所以空位用透明占位撑住。
+/// 「点击此处粘贴文件」那个标签已经删了（用户说多余），
+/// 粘贴提示改由副标题临时改写承担，不占额外高度。
 struct UploadCard: View {
     @EnvironmentObject var state: AppState
     let slot: AppState.Slot
     let title: String
     let subtitle: String
 
-    /// 叉按钮悬停时整体向右上挪 1pt，阴影同步放大，看着像"浮起来"了一下
-    @State private var isCloseHover = false
-    /// 整张上传卡的 hover：只在卡片上叠一层浅蓝提亮，不动玻璃本身，不放大不提亮，
-    /// 避免退出/取消按钮那次的闪黑闪白；生成进行中卡片被禁用时不响应 hover。
+    /// 加号 hover：自绘气泡，`.help()` 有约 1 秒系统延迟，达不到「几乎瞬间冒泡」
+    @State private var plusHover = false
     @State private var cardHover = false
 
-    private var url: URL? {
-        slot == .topic ? state.topicURL : state.essayURL
+    private var items: [UploadItem] { state.uploads[slot] ?? [] }
+    private var armed: Bool { state.pasteArmed == slot }
+    private var filled: Bool { !items.isEmpty }
+    private var limits: (images: Int, docs: Int) { AppState.limits(for: slot) }
+
+    private var limitText: String {
+        // 用户 2026-10-27：数量规则不再放第一行右侧，接到第二行提示语后面。
+        "，word 或 pdf 文档最多 \(limits.docs) 个，图片最多 \(limits.images) 张"
     }
 
-    private var active: Bool { url != nil }
-
-    private var fileSize: Int {
-        guard let url = url else { return 0 }
-        return ((try? FileManager.default.attributesOfItem(atPath: url.path))?[.size] as? Int ?? 0) / 1024
+    private var borderColor: Color {
+        if armed { return Color.brandBlue.opacity(0.75) }
+        return Color.secondary.opacity(filled ? 0.22 : 0.28)
     }
-
-    /// 用 `mutating get` 绕开 struct 里 closure 写 self 的限制
-    private mutating func setCloseHover(_ value: Bool) { isCloseHover = value }
 
     var body: some View {
-        ZStack(alignment: .topTrailing) {
-            Button {
-                state.chooseFile(for: slot)
-            } label: {
-                content
+        VStack(alignment: .leading, spacing: 11) {
+            header
+            actionRow
+        }
+        .padding(.horizontal, 15)
+        .padding(.vertical, 13)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .onTapGesture {
+            guard !state.isRunning else { return }
+            // 点框内一律「激活」，不再「再点一次取消」（用户 2026-10-27）：
+            // 取消只由「点框外」触发，见 installPasteMonitor 里的鼠标监听。
+            state.armPaste(slot)
+            state.closePasteMenu()      // 右键小菜单还开着的话，这一下把它收了
+        }
+        .trialGlassCard(cornerRadius: 16,
+                        shadowOpacity: filled || armed ? 0.09 : 0.03,
+                        shadowRadius: filled || armed ? 14 : 6)
+        .overlay(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .fill(armed ? Color.brandBlue.opacity(0.06)
+                            : Color.brandBlue.opacity(cardHover ? 0.03 : 0))
+                .allowsHitTesting(false)
+        )
+        .overlay(
+            // 实线：虚线框在浅色背景上发飘，用户 2026-10-27 明确要求改实线
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .strokeBorder(borderColor, lineWidth: armed ? 1.4 : 1)
+                .allowsHitTesting(false)
+        )
+        .overlay {
+            // 右键：激活本框 + 在鼠标位置冒出「粘贴 / 取消」小菜单（用户 2026-10-27）。
+            // 窗口失焦时的第一次左键也在这里接（否则会被 AppKit 吞掉），转成「激活」。
+            // 平时左键完全穿透（见 RightClickCatcher）。
+            RightClickCatcher(
+                onRightClick: { point in
+                    guard !state.isRunning else { return }
+                    state.openPasteMenu(slot, at: point)
+                },
+                onFirstLeftClick: {
+                    guard !state.isRunning else { return }
+                    state.armPaste(slot)
+                }
+            )
+        }
+        .overlay {
+            // 小菜单。位置夹在框内，免得贴边时半个菜单露到卡片外面去。
+            if state.pasteMenuSlot == slot {
+                GeometryReader { geo in
+                    PasteBubble(
+                        onPaste: {
+                            // 留着激活态：和 ⌘V 粘贴完一样，框还是蓝的，可以接着粘下一张
+                            state.keepPasteArmed(slot)
+                            state.closePasteMenu()
+                            state.pasteFromClipboard(into: slot)
+                        },
+                        onCancel: {
+                            state.closePasteMenu()
+                            state.pasteArmed = nil
+                        }
+                    )
+                    .position(
+                        x: min(max(state.pasteMenuPoint.x, 62), max(geo.size.width - 62, 62)),
+                        y: min(max(state.pasteMenuPoint.y, 44), max(geo.size.height - 44, 44))
+                    )
+                }
             }
-            .buttonStyle(.plain)
-            .handCursor()
-            .disabled(state.isRunning)
-
-            if active {
-                Button {
-                    state.clearFile(for: slot)
-                } label: {
-                    Image(systemName: "xmark")
-                        .font(.system(size: 9, weight: .bold))
-                        .foregroundStyle(.white)
-                        .frame(width: 22, height: 22)
-                        .background(Circle().fill(Color.brandPink))
-                        .shadow(color: Color.brandPink.opacity(isCloseHover ? 0.4 : 0.3),
-                                radius: isCloseHover ? 4 : 3,
-                                y: isCloseHover ? 2 : 1)
-                        .offset(x: isCloseHover ? 1 : 0, y: isCloseHover ? -1 : 0)
-                        .animation(.easeOut(duration: 0.12), value: isCloseHover)
-                }
-                .buttonStyle(.plain)
-                .padding(11)
-                .handCursor()
-                .onHover { [self] inside in
-                    var copy = self
-                    copy.setCloseHover(inside)
-                }
-                .help("移除这个文件")
-                .transition(.scale.combined(with: .opacity))
+        }
+        .overlay {
+            // 提示落在**本框的正中心**（用户 2026-10-27：从窗口顶部降到对应框的中心）。
+            // 只有 toastSlot 是自己的框才显示，两个框不会同时弹。
+            if state.toastSlot == slot, let text = state.toast {
+                ToastBar(text: text) { state.dismissToast() }
+                    .transition(.opacity.combined(with: .scale(scale: 0.94)))
             }
         }
         .onHover { cardHover = $0 && !state.isRunning }
         .animation(.easeOut(duration: 0.15), value: cardHover)
-        .animation(.easeOut(duration: 0.18), value: active)
+        .animation(.easeOut(duration: 0.18), value: armed)
+        .animation(.easeOut(duration: 0.18), value: filled)
+        .animation(.easeOut(duration: 0.18), value: items.count)
     }
 
-    private var content: some View {
-        VStack(spacing: 6) {
-            HStack(spacing: 9) {
-                Image(systemName: active ? "doc.fill" : "doc.badge.plus")
-                    .font(.system(size: 19))
-                    .foregroundStyle(active ? Color.brandBlue : Color.secondary)
-                Text(title)
-                    .font(.system(size: 15, weight: .semibold))
-            }
+    // MARK: 标题区
 
-            if let url = url {
-                Text(url.lastPathComponent)
-                    .font(.system(size: 13, weight: .medium))
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                    .padding(.horizontal, 26)
-                Text("\(fileSize) KB · 点框里任何地方可以换一个")
-                    .font(.system(size: 11))
+    private var header: some View {
+        // 两行间距 2 → 6（用户 2026-10-27 截图反馈：贴得太近）。框会因此高 4pt，
+        // 下面的元素顺着往下走 —— 外层是 VStack + ScrollView，不用额外处理。
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 6) {
+                Text(title)
+                    .font(.system(size: 14.5, weight: .semibold))
+                if filled {
+                    Image(systemName: "checkmark.circle.fill")
+                        .font(.system(size: 11))
+                        .foregroundStyle(Color.green.opacity(0.9))
+                } else {
+                    Text("＊必选")
+                        .font(.system(size: 10.5, weight: .medium))
+                        .foregroundStyle(Color.brandPink)
+                }
+                Spacer(minLength: 8)
+            }
+            // 「按 ⌘V 粘贴」放在第一行（用户 2026-10-27）：第二行要放完整的格式与数量说明，
+            // 蓝色提示压在上面会把它盖掉。**水平居中而不是靠右**（同日第二次反馈）——
+            // 用 overlay 而不是 HStack 里的 Spacer：居中不占布局宽度，标题长短变化时它也不会左右跳。
+            // 标题很短（「上传作文题目」＋＊必选 ≈ 140pt），居中位置（≈212pt 起）不会撞上。
+            .overlay(alignment: .center) {
+                if armed {
+                    // 右键也能直接粘贴（用户 2026-10-27），文案跟着写全
+                    Text("按 ⌘V 或者右键粘贴，点框外取消")
+                        .font(.system(size: 10.5, weight: .medium))
+                        .foregroundStyle(Color.brandBlue)
+                        .lineLimit(1)
+                        .fixedSize()
+                        .transition(.opacity)
+                }
+            }
+            // 第二行恒定是「支持哪些格式 + 数量上限」，激活粘贴时也不再改写成别的文字。
+            // 加上数量后这句变长了，窄窗口下按 0.9 缩一点，宁可小一号也不要截断成「…图片最多…」。
+            Text(subtitle + limitText)
+                .font(.system(size: 11.5))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .minimumScaleFactor(0.9)
+                .truncationMode(.tail)
+        }
+    }
+
+    // MARK: 操作行（加号 + 三等分预览卡片）
+
+    /// 一行装完：左边加号，右边三等分的位置放预览卡片。
+    /// **三等分是固定的**（不管放了 0 个还是 3 个，每格都是同样宽），
+    /// 这样框的高度永远不变，620×720 的固定窗口装得下所有元素。
+    private var actionRow: some View {
+        HStack(spacing: 9) {
+            plusButton
+            HStack(spacing: 8) {
+                ForEach(0..<3, id: \.self) { index in
+                    if index < items.count {
+                        previewCard(items[index], index: index)
+                    } else {
+                        Color.clear.frame(maxWidth: .infinity)
+                    }
+                }
+            }
+            .frame(maxWidth: .infinity)
+        }
+        // 空框时的一句提示（用户 2026-10-27）：**水平居中**、灰色、14pt、不加粗。
+        // 用 overlay 而不是塞进 HStack —— 塞进去会占布局宽度，把三等分的预览卡片挤窄。
+        // 它只是文案：不挂手势、也不吃点击（allowsHitTesting(false)），
+        // 点它跟点框里其他空白处一样，落到框自己的 tap 上。
+        // 有文件时 / 已经在等粘贴时 / 正在跑的时候都不显示。
+        .overlay(alignment: .center) {
+            if items.isEmpty && !armed && !state.isRunning {
+                Text("点击此处可粘贴")
+                    .font(.system(size: 14))
                     .foregroundStyle(.secondary)
-            } else {
-                Text(subtitle)
-                    .font(.system(size: 12))
-                    .foregroundStyle(.secondary)
-                Text("＊必选，点框里任何地方选择文件")
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(Color.brandPink)
+                    .allowsHitTesting(false)
+                    .transition(.opacity)
             }
         }
-        .frame(maxWidth: .infinity)
-        .padding(.vertical, 19)
-        .padding(.horizontal, 16)
+    }
+
+    private var plusButton: some View {
+        Button {
+            // 加号也算「框内点击」，不退出等待粘贴（用户 2026-10-27：只有点框外才取消）。
+            // 挑完文件回来框还是蓝的，再点框外一下就清了。
+            state.keepPasteArmed(slot)
+            state.chooseFile(for: slot)
+        } label: {
+            Image(systemName: "plus")
+                .font(.system(size: 17, weight: .medium))
+                .foregroundStyle(Color.brandBlue.opacity(plusHover ? 1 : 0.8))
+                .frame(width: 46, height: 46)
+                .background(
+                    RoundedRectangle(cornerRadius: 11, style: .continuous)
+                        .fill(Color.brandBlue.opacity(plusHover ? 0.13 : 0.06))
+                )
+                .overlay(
+                    // 实线（用户 2026-10-27：外框不要虚线）。加号跟着一起改实线，
+                    // 免得框里一半实线一半虚线。
+                    RoundedRectangle(cornerRadius: 11, style: .continuous)
+                        .strokeBorder(Color.brandBlue.opacity(plusHover ? 0.6 : 0.32),
+                                      lineWidth: 1)
+                )
+        }
+        .buttonStyle(.plain)
+        .handCursor()
+        .onHover { plusHover = $0 }
+        .animation(.easeOut(duration: 0.07), value: plusHover)
+        .disabled(state.isRunning)
+        .overlay(alignment: .topLeading) { uploadTooltip }
+    }
+
+    /// 自绘气泡：0.07 秒淡入，不挡鼠标。往上浮 26pt 压在副标题上 ——
+    /// 这是 tooltip 该有的样子（短暂、盖住内容、走开就消失）。
+    /// 靠左对齐而不是居中：气泡比加号宽得多，居中会溢出卡片左边缘。
+    @ViewBuilder
+    private var uploadTooltip: some View {
+        if plusHover && !state.isRunning {
+            Text("点击此处上传文件")
+                .font(.system(size: 10.5, weight: .medium))
+                .foregroundStyle(.white)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .fill(Color(nsColor: .darkGray).opacity(0.95))
+                )
+                .fixedSize()
+                .offset(y: -26)
+                .allowsHitTesting(false)
+                .transition(.opacity)
+        }
+    }
+
+    // MARK: 预览卡片（三等分，一行装完）
+
+    /// 卡片很窄（约 160pt），所以做成一行的紧凑版：
+    /// 缩略图 + 文件名/大小两行小字，右上角一个小圆叉。
+    /// 多于一个时，最左边显示 1/2/3 序号 —— 3 张照片就是第 1/2/3 页，
+    /// AI 只能按附件顺序理解，顺序错了整篇作文就乱（用户 2026-10-27 同意加）。
+    private func previewCard(_ item: UploadItem, index: Int) -> some View {
+        HStack(spacing: 5) {
+            if items.count > 1 {
+                Text("\(index + 1)")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 8)
+            }
+            thumbnail(item)
+            VStack(alignment: .leading, spacing: 0) {
+                Text(item.name)
+                    .font(.system(size: 10.5, weight: .medium))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Text(item.sizeText)
+                    .font(.system(size: 9))
+                    .foregroundStyle(.secondary)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.leading, 4)
+        .padding(.trailing, 17)          // 给右上角的叉留位置，别压住文件名
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .frame(height: 46)
+        .background(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(Color.secondary.opacity(0.07))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .strokeBorder(Color.secondary.opacity(0.16), lineWidth: 1)
+        )
+        .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        // 点卡片 = 放大预览。放在叉按钮**之前**，让右上角那个叉优先吃到点击。
+        .onTapGesture { state.openPreview(item) }
+        .overlay(alignment: .topTrailing) {
+            // 卡片右上角的圆形大叉：移除这一张。
+            // 白底深色叉（用户 2026-10-27 统一要求），描一圈淡边，浅色底上也能看清。
+            Button {
+                state.removeUpload(item.id, for: slot)
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 6.5, weight: .bold))
+                    .foregroundStyle(Color.black.opacity(0.72))
+                    .frame(width: 13, height: 13)
+                    .background(Circle().fill(Color.white))
+                    .overlay(Circle().strokeBorder(Color.black.opacity(0.16), lineWidth: 0.7))
+                    .shadow(color: .black.opacity(0.16), radius: 1.5, y: 0.5)
+            }
+            .buttonStyle(.plain)
+            .handCursor()
+            .help("移除这个文件")
+            .padding(3)
+        }
+        .transition(.opacity.combined(with: .scale(scale: 0.96)))
+    }
+
+    @ViewBuilder
+    private func thumbnail(_ item: UploadItem) -> some View {
+        // 36 不是 24：用户 2026-10-27 说「圆角方块和卡片外框的边距太大」。
+        // 卡片高 46，缩略图 36 → 上下各 5，比原来（38 / 24，上下各 7）贴得紧。
+        if let thumb = item.thumb {
+            Image(nsImage: thumb)
+                .resizable()
+                .aspectRatio(contentMode: .fill)
+                .frame(width: 36, height: 36)
+                .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 7, style: .continuous)
+                        .strokeBorder(Color.secondary.opacity(0.2), lineWidth: 0.8)
+                )
+        } else {
+            Image(systemName: "doc.text.fill")
+                .font(.system(size: 14))
+                .foregroundStyle(Color.brandBlue.opacity(0.85))
+                .frame(width: 36, height: 36)
+                .background(
+                    RoundedRectangle(cornerRadius: 7, style: .continuous)
+                        .fill(Color.brandBlue.opacity(0.10))
+                )
+        }
+    }
+}
+
+// MARK: - 右键层 + 「窗口没焦点时的第一次左键」
+
+/// 让上传框能响应右键，同时**不影响左键**。
+///
+/// 为什么不用 SwiftUI：`onTapGesture` 只认左键；`.contextMenu` 会弹系统菜单；
+/// `.gesture` 也接不到右键。AppKit 这边 `rightMouseDown` 是现成的，
+/// 所以垫一个透明 NSView，在 `hitTest` 里**只在右键事件时返回自己**，左键一律返回 nil ——
+/// 事件继续往下一层找，框的 tap、加号的按钮都照常工作。
+///
+/// 用户 2026-10-27 要求：框内右键 = 激活该框 + 在鼠标位置冒出「粘贴 / 取消」小菜单。
+/// 左键连续点框内保持激活，右键也一样（不再是「右键取消」）。
+///
+/// **还顺手补了一个 macOS 的坑**（用户 2026-10-27 报）：窗口失去焦点、但仍然肉眼可见时，
+/// 左键点框没反应，右键却正常。原因是 AppKit 的「第一次点击」规则 ——
+/// 非 key 窗口上的左键只用来激活窗口，事件被吞掉，除非命中的视图
+/// `acceptsFirstMouse` 返回 true。右键不受这条限制，所以只有左键坏。
+/// 修法：窗口不是 key 时，这一层把左键也接过来（`hitTest` 返回自己），
+/// `mouseDown` 里直接转成「激活粘贴框」。窗口变 key 之后照旧穿透，一切照常。
+struct RightClickCatcher: NSViewRepresentable {
+    /// 右键回调。参数是**框内坐标**（左上原点，y 向下），用来决定小菜单弹在哪
+    let onRightClick: (CGPoint) -> Void
+    /// 窗口没焦点时的第一次左键（本来会被 AppKit 吞掉）—— 转成「激活这个框」
+    let onFirstLeftClick: () -> Void
+
+    func makeNSView(context: Context) -> NSView {
+        let v = CatcherView()
+        v.onRightClick = onRightClick
+        v.onFirstLeftClick = onFirstLeftClick
+        return v
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        guard let v = nsView as? CatcherView else { return }
+        v.onRightClick = onRightClick
+        v.onFirstLeftClick = onFirstLeftClick
+    }
+
+    final class CatcherView: NSView {
+        var onRightClick: ((CGPoint) -> Void)?
+        var onFirstLeftClick: (() -> Void)?
+
+        /// 不返回 true 的话，窗口没焦点时这一层连事件都收不到
+        override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+        override func hitTest(_ point: NSPoint) -> NSView? {
+            // 判断「当前这个事件是不是右键」—— NSApp.currentEvent 在命中测试期间就是它。
+            // 不是右键就返回 nil，等于这一层不存在（左键穿透）。
+            guard let type = NSApp.currentEvent?.type else { return nil }
+            switch type {
+            case .rightMouseDown, .rightMouseUp, .rightMouseDragged:
+                return super.hitTest(point)
+            case .leftMouseDown:
+                // 窗口不是 key：这一下左键本来会被 AppKit 吞掉（只拿去激活窗口），
+                // 拦下来自己处理，让「点框 = 激活粘贴」在失焦状态下也成立。
+                return window?.isKeyWindow == false ? super.hitTest(point) : nil
+            default:
+                return nil
+            }
+        }
+
+        override func rightMouseDown(with event: NSEvent) {
+            // NSView 默认坐标原点在左下，SwiftUI 的 overlay 是左上原点 —— 这里翻一下，
+            // 否则小菜单会上下颠倒地弹出来。
+            let p = convert(event.locationInWindow, from: nil)
+            onRightClick?(CGPoint(x: p.x, y: bounds.height - p.y))
+        }
+
+        override func mouseDown(with event: NSEvent) {
+            onFirstLeftClick?()
+        }
+    }
+}
+
+// MARK: - 右键小菜单
+
+/// 右键弹出的两选一气泡（用户 2026-10-27）：圆角矩形、仿 glass、只有「粘贴 / 取消」。
+/// 不用系统 `.contextMenu`：那个是系统样式的菜单，和这套玻璃卡片不搭，也没法定两个选项的样式。
+struct PasteBubble: View {
+    let onPaste: () -> Void
+    let onCancel: () -> Void
+
+    @State private var hover: Int?
+
+    var body: some View {
+        VStack(spacing: 0) {
+            row(0, title: "粘贴", icon: "doc.on.clipboard", action: onPaste)
+            Rectangle()
+                .fill(Color.secondary.opacity(0.18))
+                .frame(height: 1)
+                .padding(.horizontal, 8)
+            row(1, title: "取消", icon: "xmark", action: onCancel)
+        }
+        .padding(5)
+        .frame(width: 112)
+        .trialGlassCard(cornerRadius: 12, shadowOpacity: 0.22, shadowRadius: 14)
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .strokeBorder(Color.secondary.opacity(0.16), lineWidth: 1)
+                .allowsHitTesting(false)
+        )
+        .transition(.opacity.combined(with: .scale(scale: 0.92, anchor: .center)))
+    }
+
+    private func row(_ index: Int, title: String, icon: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 7) {
+                Image(systemName: icon)
+                    .font(.system(size: 10.5))
+                    .frame(width: 13)
+                Text(title)
+                    .font(.system(size: 12))
+                Spacer(minLength: 0)
+            }
+            .foregroundStyle(hover == index ? Color.brandBlue : Color.primary.opacity(0.86))
+            .padding(.horizontal, 7)
+            .padding(.vertical, 6)
+            .background(
+                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    .fill(Color.brandBlue.opacity(hover == index ? 0.12 : 0))
+            )
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .handCursor()
+        .onHover { hover = $0 ? index : (hover == index ? nil : hover) }
+    }
+}
+
+// MARK: - 短提示条
+
+/// 粘贴被拒、数量超限之类的一句话提示。
+/// 位置：**触发它的那个上传框正中心**（用户 2026-10-27 要求，从窗口顶部降下来）。
+/// 时长：渐显 0.18 秒 → 停 2.7 秒 → 渐隐 0.3 秒。
+/// 存留期间点它一下也会走掉，渐隐速度和渐显一样（0.18 秒，见 `AppState.dismissToast`）。
+struct ToastBar: View {
+    let text: String
+    var onTap: (() -> Void)? = nil
+
+    var body: some View {
+        HStack(spacing: 7) {
+            Image(systemName: "exclamationmark.circle.fill")
+                .font(.system(size: 11))
+            Text(text)
+                .font(.system(size: 12, weight: .medium))
+        }
+        .foregroundStyle(.white)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 8)
+        .background(
+            Capsule().fill(Color(nsColor: .darkGray).opacity(0.94))
+                .shadow(color: .black.opacity(0.22), radius: 10, y: 4)
+        )
+        .contentShape(Capsule())
+        .onTapGesture { onTap?() }
+    }
+}
+
+// MARK: - 卡片放大预览
+
+/// 点预览卡片 → 丝滑放大（0.62 → 1，弹簧收尾）。
+/// - 图片：直接放大看内容（NSImage，最快最清晰）
+/// - pdf / doc / docx：走 Quick Look（系统同款生成器，真实排版、可滚动翻页）
+/// - 其余：退到信息卡（完整文件名、类型、大小、所在文件夹）
+/// **点一下就关**（用户 2026-10-27 要求），背景压暗一点点只是为了聚焦。
+/// 用户 2026-10-27 看过带尾巴的草图后说「先不带尾巴，和图片预览逻辑类似，宽度略大于图片」，
+/// 所以这里是居中浮层：图片最宽 500，文档 540（略宽一点）。
+struct PreviewPanel: View {
+    let item: UploadItem
+    let close: () -> Void
+
+    /// 这几种交给 Quick Look 真渲染
+    private static let quickLookTypes: Set<String> = ["pdf", "doc", "docx"]
+
+    private var ext: String { item.url?.pathExtension.lowercased() ?? "" }
+
+    private var typeText: String {
+        switch item.url?.pathExtension.lowercased() {
+        case .none: return "剪贴板图片"
+        case "doc", "docx": return "Word 文档"
+        case "pdf": return "PDF 文档"
+        case "png", "jpg", "jpeg": return "图片"
+        case .some(let ext): return "\(ext.uppercased()) 文件"
+        }
+    }
+
+    var body: some View {
+        ZStack {
+            Color.black.opacity(0.16)
+                .transition(.opacity)
+            VStack(spacing: 9) {
+                if let thumb = item.thumb {
+                    imagePanel(thumb)
+                } else if let url = item.url, Self.quickLookTypes.contains(ext) {
+                    documentPreview(url)
+                } else {
+                    docCard.overlay(alignment: .topTrailing) { closeButton.padding(8) }
+                }
+                Text("\(item.name) · \(item.sizeText)")
+                    .font(.system(size: 10.5, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.92))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .padding(.horizontal, 11)
+                    .padding(.vertical, 4)
+                    .background(Capsule().fill(Color.black.opacity(0.42)))
+                Text("点右上角的 ✕ 或面板外面关闭")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.white.opacity(0.7))
+            }
+            .padding(18)
+            .transition(.scale(scale: 0.62).combined(with: .opacity))
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .contentShape(Rectangle())
-        .trialGlassCard(cornerRadius: 16, shadowOpacity: active ? 0.09 : 0.03, shadowRadius: active ? 14 : 6)
+        .onTapGesture { close() }
+    }
+
+    /// 图片：**先按图片本身的比例算好显示尺寸**，再把叉压在图片内层。
+    /// 之前用 `.frame(maxWidth: 500, maxHeight: 496)` —— 那个 frame 在图片比上限小的时候
+    /// 仍会撑到上限那么大，叉就飘到图片外面去了（用户 2026-10-27 报的就是这个）。
+    /// 现在宽高显式给定，容器和图片一样大，叉永远在画面里。
+    private func imagePanel(_ thumb: NSImage) -> some View {
+        let size = Self.displaySize(for: thumb)
+        return Image(nsImage: thumb)
+            .resizable()
+            .frame(width: size.width, height: size.height)
+            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .overlay(alignment: .topTrailing) { closeButton.padding(10) }
+            .shadow(color: .black.opacity(0.28), radius: 22, y: 8)
+    }
+
+    private static func displaySize(for image: NSImage) -> CGSize {
+        let maxW: CGFloat = 500
+        let maxH: CGFloat = 496
+        let w = max(image.size.width, 1)
+        let h = max(image.size.height, 1)
+        // 小图最多放大 3 倍，再大就糊了
+        let scale = min(maxW / w, maxH / h, 3)
+        return CGSize(width: (w * scale).rounded(), height: (h * scale).rounded())
+    }
+
+    /// 面板内层右上角的大叉（用户 2026-10-27 要求：放在内层、留一点边距）。
+    /// 样式：**白底 + 深色叉**（用户 2026-10-27 统一要求，全 App 的叉都改成这样），
+    /// 描一圈淡灰边，压在浅色图片上也看得见。
+    private var closeButton: some View {
+        Button {
+            close()
+        } label: {
+            Image(systemName: "xmark")
+                .font(.system(size: 9, weight: .bold))
+                .foregroundStyle(Color.black.opacity(0.72))
+                .frame(width: 22, height: 22)
+                .background(Circle().fill(Color.white))
+                .overlay(Circle().strokeBorder(Color.black.opacity(0.14), lineWidth: 0.8))
+                .shadow(color: .black.opacity(0.20), radius: 3, y: 1)
+        }
+        .buttonStyle(.plain)
+        .handCursor()
+        .help("关闭预览")
+    }
+
+    // MARK: 文档（Quick Look 真渲染）
+
+    /// 宽 460 —— 用户 2026-10-27 说「改为现有的 85% 左右」（540 × 0.85 ≈ 459）。
+    /// 上面留一条信息栏，正文交给 Quick Look / PDFKit。
+    /// 注意：正文区域本身不接「点一下关闭」，否则翻页和滚动会被吃掉；
+    /// 关面板靠右上角的 ✕、点信息栏、点面板外面或按 Esc。
+    private func documentPreview(_ url: URL) -> some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 7) {
+                Image(systemName: "doc.text.fill")
+                    .font(.system(size: 12))
+                    .foregroundStyle(Color.brandBlue)
+                Text(item.name)
+                    .font(.system(size: 12, weight: .semibold))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Spacer(minLength: 8)
+                Text("\(typeText) · \(item.sizeText)")
+                    .font(.system(size: 10.5))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            .padding(.leading, 12)
+            // 右边多留 36：给内层右上角那个大叉让位，别让类型文字钻到叉底下
+            .padding(.trailing, 36)
+            .frame(height: 34)
+            .contentShape(Rectangle())
+            .onTapGesture { close() }
+
+            Divider()
+
+            // pdf 单独走 PDFKit：Quick Look 的 PDF 显示包是**独立进程**的远程视图（NSRemoteView），
+            // 滚轮事件在那边不响应（用户 2026-10-27 反馈「pdf 滚轮无效，doc/docx 正常」）。
+            // PDFKit 是进程内的 NSScrollView，滚轮、翻页、缩放都正常，清晰度也更好。
+            if ext == "pdf" {
+                PDFPreview(url: url)
+                    .frame(width: 460, height: 480)
+            } else {
+                QuickLookPreview(url: url)
+                    .frame(width: 460, height: 480)
+            }
+        }
+        .frame(width: 460)
+        .background(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(Color(nsColor: .controlBackgroundColor))
+        )
+        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .strokeBorder(Color.secondary.opacity(0.18), lineWidth: 1)
+        )
+        .overlay(alignment: .topTrailing) { closeButton.padding(8) }
+        .shadow(color: .black.opacity(0.24), radius: 22, y: 8)
+    }
+
+    // MARK: 兜底信息卡
+
+    private var docCard: some View {
+        VStack(spacing: 9) {
+            Image(systemName: "doc.text.fill")
+                .font(.system(size: 36))
+                .foregroundStyle(Color.brandBlue)
+            Text(item.name)
+                .font(.system(size: 14, weight: .semibold))
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
+            Text("\(typeText) · \(item.sizeText)")
+                .font(.system(size: 12))
+                .foregroundStyle(.secondary)
+            if let dir = item.url?.deletingLastPathComponent().path {
+                Text(dir)
+                    .font(.system(size: 10.5))
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(2)
+                    .truncationMode(.middle)
+                    .multilineTextAlignment(.center)
+            }
+        }
+        .padding(.horizontal, 26)
+        .padding(.vertical, 22)
+        .frame(width: 360)
+        .background(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .fill(Color(nsColor: .controlBackgroundColor))
+        )
         .overlay(
             RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .fill(Color.brandBlue.opacity(cardHover ? 0.04 : 0))
+                .strokeBorder(Color.secondary.opacity(0.18), lineWidth: 1)
         )
-        .overlay(
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .strokeBorder(Color.secondary.opacity(active ? 0 : 0.30), lineWidth: 1.2)
-        )
-        .overlay(
-            RotatingGradientBorder(radius: 16, active: active)
-                .opacity(active ? 1 : 0)
-        )
+        .shadow(color: .black.opacity(0.22), radius: 22, y: 8)
+    }
+}
+
+// MARK: - Quick Look 渲染
+/// 把系统的 Quick Look 预览视图塞进 SwiftUI。
+/// 用的是 `QLPreviewView`（Finder 里按空格看到的就是它），
+/// 所以 doc / docx / pdf 都由系统自带的 Office.qlgenerator、PDF.qlgenerator 出图，
+/// **不需要装 Office**，也不会因为格式老旧而必然打不开。
+struct QuickLookPreview: NSViewRepresentable {
+    let url: URL
+
+    func makeNSView(context: Context) -> QLPreviewView {
+        // 这个初始化器签名是可失败的，实际只在极端情况下返回 nil，
+        // 真拿不到就没法预览，这里给个空 frame 兜住，别让整个界面炸掉。
+        let view = QLPreviewView(frame: NSRect(x: 0, y: 0, width: 460, height: 480),
+                                 style: .normal) ?? QLPreviewView(frame: .zero, style: .normal)!
+        view.autostarts = true
+        view.previewItem = url as NSURL
+        if CommandLine.arguments.contains("--qldebug") {
+            QuickLookPreview.debugDump(view, path: url.lastPathComponent)
+        }
+        return view
+    }
+
+    func updateNSView(_ nsView: QLPreviewView, context: Context) {
+        guard (nsView.previewItem as? URL) != url else { return }
+        nsView.previewItem = url as NSURL
+        nsView.refreshPreviewItem()
+    }
+
+    /// 开发自检：`--qldebug` 启动时，3 秒后把预览视图的子视图类名打出来。
+    /// 渲染成功会看到 WebView 一类的子视图；只有一个空容器就说明生成器没出图。
+    /// 走 stderr（无缓冲），否则重定向到文件时 print 会被攒着不落盘。
+    static func debugDump(_ view: NSView, path: String) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
+            func emit(_ line: String) {
+                FileHandle.standardError.write(Data((line + "\n").utf8))
+            }
+            func dump(_ v: NSView, _ depth: Int) {
+                emit("QLDEBUG \(String(repeating: "  ", count: depth))\(type(of: v)) "
+                     + "frame=\(NSStringFromRect(v.frame)) subviews=\(v.subviews.count)")
+                for sub in v.subviews where depth < 6 { dump(sub, depth + 1) }
+            }
+            emit("QLDEBUG ===== \(path) =====")
+            dump(view, 0)
+        }
+    }
+}
+
+// MARK: - PDF 渲染（PDFKit）
+
+/// pdf 不用 Quick Look，改用 PDFKit 的 `PDFView`。
+/// 原因（2026-10-27 查证）：Quick Look 给 pdf 分配的是 **独立进程**的 `NSRemoteView`，
+/// 滚轮事件在那个远程进程里不响应 —— 用户实测「pdf 滚轮无效，doc/docx 正常」。
+/// 而 doc/docx 是进程内的 `QLWeb2View` + WebKit，滚轮一直好使。
+/// PDFKit 是进程内的 NSScrollView，滚轮/翻页/双指缩放都正常，页面清晰度也比 QL 的位图好。
+struct PDFPreview: NSViewRepresentable {
+    let url: URL
+
+    func makeNSView(context: Context) -> PDFView {
+        let view = PDFView()
+        view.autoScales = true                     // 页面宽度自适应面板
+        view.displayMode = .singlePageContinuous   // 连续滚动，多页往下翻
+        view.displayDirection = .vertical
+        view.displaysPageBreaks = true
+        view.pageShadowsEnabled = true
+        view.backgroundColor = .underPageBackgroundColor
+        view.document = PDFDocument(url: url)
+        if CommandLine.arguments.contains("--qldebug") {
+            QuickLookPreview.debugDump(view, path: url.lastPathComponent)
+        }
+        return view
+    }
+
+    func updateNSView(_ view: PDFView, context: Context) {
+        guard view.document?.documentURL != url else { return }
+        view.document = PDFDocument(url: url)
+        view.autoScales = true
     }
 }
 
@@ -933,19 +1719,13 @@ struct ProgressBar: View {
 struct WordCard: View {
     @EnvironmentObject var state: AppState
 
-    /// 卡片和里面三个按钮的 hover，做法和上传卡、生成按钮一样：
+    /// 卡片和里面按钮的 hover，做法和上传卡、生成按钮一样：
     /// 只在玻璃上叠一层浅色提亮，不动玻璃、不放大、不提亮。
     @State private var cardHover = false
     @State private var downloadHover = false
-    @State private var exportHover = false
-    @State private var detailsHover = false
+    @State private var logHover = false
 
     private var active: Bool { state.docx.isReady }
-
-    private var isFailed: Bool {
-        if case .failed = state.docx { return true }
-        return false
-    }
 
     private var message: String {
         switch state.docx {
@@ -957,7 +1737,9 @@ struct WordCard: View {
             let kb = ((try? FileManager.default.attributesOfItem(atPath: url.path))?[.size] as? Int ?? 0) / 1024
             return "已经生成好了（\(kb) KB），点下面的按钮保存到电脑里。"
         case .failed(let why):
-            return "这次没成功：\(why)。诊断日志已自动留在本机，需要发给开发者时点下面的按钮。"
+            // 失败只改这一行字，卡片其他部分一点不变（用户 2026-10-27：
+            // 不要换按钮、不要弹面板、不要导 md/截图，日志一律看「详情」）。
+            return "这次没成功：\(why)。点右上角「详情」可以看到这次运行的完整日志。"
         }
     }
 
@@ -980,12 +1762,32 @@ struct WordCard: View {
                     .font(.system(size: 14, weight: .semibold))
                 Spacer()
                 if active {
+                    // 纯绿字，不加药丸底（用户 2026-10-27：带边框看着像个能点的按钮）
                     Text("可下载")
                         .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(.green)
+                }
+                // 运行日志入口。跑过一次之后才出现（没跑过没什么可看的）。
+                // 放在标题行而不是按钮行：不挤「下载」的宽度，也不改变卡片高度。
+                if !state.progressLines.isEmpty {
+                    Button { state.toggleLog() } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: "text.alignleft")
+                                .font(.system(size: 9, weight: .semibold))
+                            Text(state.showLog ? "收起" : "详情")
+                                .font(.system(size: 11))
+                        }
+                        .foregroundStyle(Color.brandBlue)
                         .padding(.horizontal, 8)
                         .padding(.vertical, 3)
-                        .trialGlassCapsule(fallbackFill: Color.green.opacity(0.16))
-                        .foregroundStyle(.green)
+                        .trialGlassCapsule(fallbackFill: Color.brandBlue.opacity(logHover ? 0.16 : 0.09))
+                        .overlay(Capsule().fill(Color.brandBlue.opacity(logHover ? 0.10 : 0)))
+                    }
+                    .buttonStyle(.plain)
+                    .handCursor()
+                    .onHover { logHover = $0 }
+                    .animation(.easeOut(duration: 0.15), value: logHover)
+                    .help("看这次运行的详细日志")
                 }
             }
 
@@ -996,82 +1798,35 @@ struct WordCard: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
 
             HStack(spacing: 10) {
-                if isFailed {
-                    // 失败时主按钮换成「导出诊断报告」——
-                    // 用户不需要看懂 Python，只要把这个文件夹发给开发者就行
-                    Button {
-                        state.exportDiagnostics()
-                    } label: {
-                        HStack(spacing: 6) {
-                            Image(systemName: "square.and.arrow.up")
-                                .font(.system(size: 12))
-                            Text("导出诊断报告")
-                                .font(.system(size: 13, weight: .medium))
-                        }
-                        .foregroundStyle(.white)
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 10)
-                        .trialGlassTinted(cornerRadius: 10,
-                                          tint: Color.brandPink,
-                                          fallback: AnyShapeStyle(LinearGradient(colors: [.brandPink, .brandPurple],
-                                                                                   startPoint: .leading, endPoint: .trailing)),
-                                          shadowColor: .clear, shadowRadius: 0, shadowY: 0)
-                        .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous)
-                            .fill(Color.white.opacity(exportHover ? 0.06 : 0)))
+                // 成功失败都是这一个按钮（用户 2026-10-27：失败时不要换按钮、
+                // 不要弹面板、不要导 md/截图）。没生成好就是禁用态，日志去「详情」看。
+                Button {
+                    state.downloadDocx()
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: active ? "arrow.down.circle.fill" : "arrow.down.circle")
+                            .font(.system(size: 12))
+                        Text(buttonTitle)
+                            .font(.system(size: 13, weight: .medium))
                     }
-                    .buttonStyle(.plain)
-                    .handCursor()
-                    .onHover { exportHover = $0 }
-                    .animation(.easeOut(duration: 0.15), value: exportHover)
-
-                    Button {
-                        state.showOutputPanel = true
-                    } label: {
-                        Text("查看详情")
-                            .font(.system(size: 13))
-                            .padding(.horizontal, 14)
-                            .padding(.vertical, 10)
-                            .trialGlassTinted(cornerRadius: 10,
-                                              tint: Color.secondary,
-                                              fallback: AnyShapeStyle(Color.secondary.opacity(0.12)),
-                                              shadowColor: .clear, shadowRadius: 0, shadowY: 0)
-                            .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous)
-                                .fill(Color.white.opacity(detailsHover ? 0.06 : 0)))
-                    }
-                    .buttonStyle(.plain)
-                    .handCursor()
-                    .onHover { detailsHover = $0 }
-                    .animation(.easeOut(duration: 0.15), value: detailsHover)
-                } else {
-                    Button {
-                        state.downloadDocx()
-                    } label: {
-                        HStack(spacing: 6) {
-                            Image(systemName: active ? "arrow.down.circle.fill" : "arrow.down.circle")
-                                .font(.system(size: 12))
-                            Text(buttonTitle)
-                                .font(.system(size: 13, weight: .medium))
-                        }
-                        .foregroundStyle(active ? Color.white : Color(nsColor: .secondaryLabelColor))
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 10)
-                        .trialGlassTinted(cornerRadius: 10,
-                                          tint: active ? Color.brandBlue : Color.secondary,
-                                          fallback: active
-                                            ? AnyShapeStyle(LinearGradient(colors: [.brandBlue, .brandPurple],
-                                                                           startPoint: .leading, endPoint: .trailing))
-                                            : AnyShapeStyle(Color.secondary.opacity(0.14)),
-                                          shadowColor: .clear, shadowRadius: 0, shadowY: 0)
-                        .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous)
-                            .fill(Color.white.opacity(downloadHover ? 0.06 : 0)))
-                    }
-                    .buttonStyle(.plain)
-                    .handCursor()
-                    .onHover { downloadHover = $0 }
-                    .animation(.easeOut(duration: 0.15), value: downloadHover)
-                    .disabled(!active)
-
+                    .foregroundStyle(active ? Color.white : Color(nsColor: .secondaryLabelColor))
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 10)
+                    .trialGlassTinted(cornerRadius: 10,
+                                      tint: active ? Color.brandBlue : Color.secondary,
+                                      fallback: active
+                                        ? AnyShapeStyle(LinearGradient(colors: [.brandBlue, .brandPurple],
+                                                                       startPoint: .leading, endPoint: .trailing))
+                                        : AnyShapeStyle(Color.secondary.opacity(0.14)),
+                                      shadowColor: .clear, shadowRadius: 0, shadowY: 0)
+                    .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .fill(Color.white.opacity(downloadHover ? 0.06 : 0)))
                 }
+                .buttonStyle(.plain)
+                .handCursor()
+                .onHover { downloadHover = $0 }
+                .animation(.easeOut(duration: 0.15), value: downloadHover)
+                .disabled(!active)
             }
         }
         .padding(16)
@@ -1094,58 +1849,136 @@ struct WordCard: View {
             RotatingGradientBorder(radius: 16, active: active)
                 .opacity(active ? 1 : 0)
         )
-        .onHover { cardHover = $0 && (active || isFailed) }
+        .onHover { cardHover = $0 && active }
         .animation(.easeOut(duration: 0.15), value: cardHover)
         .animation(.easeOut(duration: 0.2), value: active)
     }
 }
 
-// MARK: - 运行输出面板（只在出错时自动弹出）
+// MARK: - 运行日志面板
 
-struct OutputSheet: View {
+/// 「详情」按钮打开的那块。成功跑完也能看 —— 之前 `progressLines` 只在失败诊断的
+/// md 里出现，成功一次就什么都看不到，想确认「提示词回读一致」也没地方确认。
+///
+/// 两个约束（用户 2026-10-27 定）：
+/// 1. **不许盖住自己的开关**。所以压暗层只铺上半屏（`scrimHeight`），底部给 Word 卡
+///    留出一条不遮不挡的带子，「详情」按钮永远点得到。
+/// 2. 显示/隐藏跟预览卡片一个节奏：`withAnimation(.easeOut(0.18))` + opacity 过渡。
+///    窗口本来就是固定 620×720，所以这里直接写死尺寸，不追求自适应。
+struct LogPanel: View {
     @EnvironmentObject var state: AppState
+    let onClose: () -> Void
+
+    private var lines: [String] { state.progressLines }
+    private var scriptOutput: String { state.scriptOutput }
+
+    /// 压暗层高度 = 720 - 172。172 是底部留给 Word 卡（标题行 + 说明 + 按钮行）的高度，
+    /// 少留一点就会压到「详情」按钮上。
+    private let scrimHeight: CGFloat = 548
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("出错的详细信息")
-                .font(.system(size: 16, weight: .semibold))
-            Text("这一段是给开发排查用的。你可以直接关掉，也可以复制下来发给开发者。")
-                .font(.system(size: 11))
+        ZStack(alignment: .top) {
+            Color.black.opacity(0.14)
+                .frame(maxWidth: .infinity)
+                .frame(height: scrimHeight)
+                .contentShape(Rectangle())
+                .onTapGesture { onClose() }
+
+            card.padding(.top, 20)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+    }
+
+    private var card: some View {
+        VStack(spacing: 0) {
+            header
+            Divider()
+            logList
+        }
+        .frame(width: 566, height: 516)
+        .background(RoundedRectangle(cornerRadius: 14, style: .continuous)
+            .fill(Color(nsColor: .windowBackgroundColor)))
+        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous)
+            .strokeBorder(Color.secondary.opacity(0.22), lineWidth: 1))
+        .shadow(color: .black.opacity(0.22), radius: 24, y: 10)
+    }
+
+    private var header: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "text.alignleft")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(Color.brandBlue)
+            Text("运行日志")
+                .font(.system(size: 13, weight: .semibold))
+            Text("\(lines.count) 行")
+                .font(.system(size: 10))
                 .foregroundStyle(.secondary)
-
-            ScrollView {
-                Text(state.scriptOutput.isEmpty ? "（没有输出）" : state.scriptOutput)
-                    .font(.system(size: 11, design: .monospaced))
-                    .textSelection(.enabled)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(10)
+            Spacer()
+            // 叉按钮统一白底黑字（用户 2026-10-27 定的规矩，系统级的除外）
+            Button(action: onClose) {
+                Image(systemName: "xmark")
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundStyle(Color.black.opacity(0.72))
+                    .frame(width: 22, height: 22)
+                    .background(Circle().fill(Color.white))
+                    .overlay(Circle().strokeBorder(Color.black.opacity(0.14), lineWidth: 0.8))
+                    .shadow(color: .black.opacity(0.20), radius: 3, y: 1)
             }
-            .background(
-                RoundedRectangle(cornerRadius: 8)
-                    .fill(Color(nsColor: .textBackgroundColor))
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 8)
-                    .stroke(Color(nsColor: .separatorColor), lineWidth: 1)
-            )
+            .buttonStyle(.plain)
+            .handCursor()
+            .help("关闭（Esc）")
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+    }
 
-            HStack {
-                Button("复制全部") {
-                    NSPasteboard.general.clearContents()
-                    NSPasteboard.general.setString(state.scriptOutput, forType: .string)
+    private var logList: some View {
+        ScrollViewReader { proxy in
+            ScrollView {
+                VStack(alignment: .leading, spacing: 4) {
+                    if lines.isEmpty && scriptOutput.isEmpty {
+                        Text("这次还没有日志。跑一次生成就会有了。")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                    }
+                    ForEach(Array(lines.enumerated()), id: \.offset) { index, line in
+                        Text(line)
+                            .font(.system(size: 10.5, design: .monospaced))
+                            .foregroundStyle(tint(for: line))
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .id(index)
+                    }
+                    if !scriptOutput.isEmpty {
+                        Divider().padding(.vertical, 6)
+                        Text("—— 脚本输出 ——")
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(.secondary)
+                        Text(scriptOutput)
+                            .font(.system(size: 10.5, design: .monospaced))
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    // 滚到底用的锚点
+                    Color.clear.frame(height: 1).id("bottom")
                 }
-                .controlSize(.small)
-
-                Button("导出诊断报告到桌面") { state.exportDiagnostics() }
-                    .controlSize(.small)
-
-                Spacer()
-
-                Button("知道了") { state.showOutputPanel = false }
-                    .keyboardShortcut(.defaultAction)
+                .padding(12)
+            }
+            .onAppear { proxy.scrollTo("bottom", anchor: .bottom) }
+            // 跟着日志增长自动滚到底。用 onReceive 而不是 onChange：
+            // onChange 的单参数写法在 macOS 14 已废弃，而本工程部署目标是 13.0。
+            .onReceive(state.$progressLines) { _ in
+                proxy.scrollTo("bottom", anchor: .bottom)
             }
         }
-        .padding(20)
-        .frame(width: 660, height: 460)
+        .background(Color(nsColor: .textBackgroundColor).opacity(0.55))
+    }
+
+    /// 出错的标红，警告标黄，其余保持正文色 —— 扫一眼就知道哪行有问题
+    private func tint(for line: String) -> Color {
+        if line.hasPrefix("✗") { return Color.brandRed }
+        if line.contains("⚠️") || line.contains("还没出现") { return Color.orange }
+        return Color.primary.opacity(0.85)
     }
 }
