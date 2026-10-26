@@ -71,8 +71,8 @@
 ### ❌ 还没做（用户已明确：先只做 doc/docx 单文件）
 
 - 上传框支持 pdf / jpg / png / 粘贴剪贴板图片，每框最多 3 个文件（超出要提示）—— 以后改版
-- 正式图标 —— **已明确由其他工作助手负责，本项目不碰图标**
-- GitHub 仓库 / CI Release（工程里已带 `.github/workflows/release.yml`，仓库还没建）
+
+> 图标和 GitHub 仓库这两项原本列在这里，2026-10-26 都做完了，见 §8。
 
 ---
 
@@ -153,11 +153,14 @@ article-correct-app/
 │   └── SafariBridge.swift      # AppleScript 通道（备用）
 ├── Resources/
 │   ├── 作文批改规则.md          # 网页版内嵌规则（五部分结构 + 版式 + 禁止项）
-│   ├── 标准模式批改.docx        # 版式模板 —— ⚠️ 当前是 01 号样本，等用户正式版替换
-│   ├── AppIcon.icns            # ⚠️ 当前沿用讲义版图标
-│   └── zh-Hans.lproj/
+│   ├── 标准模式批改.docx        # 版式模板（用户 2026-10-26 正式版，已按裁定改过）
+│   ├── AppIcon.icns            # 自己的图标（品红底 + 竖 A4 纸 + 钢笔 + 红批改痕）
+│   └── zh-Hans.lproj/          # ⚠️ 应用显示名在这里，不在 Info.plist（见 §6.2）
 ├── Runtime/python/             # 75MB CPython 3.12 + python-docx
 ├── tools/sample_build.py       # 版式冒烟测试 / 参考实现
+├── tools/make_icon.py          # AI 草稿图 → 1024 RGBA 苹果 squircle 母版
+├── tools/make_icns.py          # 母版 → 十档尺寸 → AppIcon.icns
+├── tools/make_test_material.py # 生成成套测试素材（题目 + 带错作文）
 ├── docs/
 │   ├── 示例-批改稿.docx          # sample_build.py 的产物，用来看版式
 │   ├── 规则md-变更记录.md        # 内嵌规则的版本变更（不属于工程交接）
@@ -289,6 +292,47 @@ pandas、matplotlib、openpyxl 之类；脚本要能一次跑完，不要用 inp
    「按文件名认」改成了「按内容判断」，同时兜住「照片拍进了多余内容」「作文有涂改痕迹」「红笔批改痕迹要忽略」。
    这条与规则 §7 的转录规则是一套的，改一边要同时看另一边。
 
+### 6.2 应用显示名（v0.14 修，别再踩）
+
+Dock 悬停气泡、菜单栏最左边那个应用菜单、访达「显示简介」里的名字，**都不读 `Info.plist` 的
+`CFBundleName`，而是读 `Resources/zh-Hans.lproj/InfoPlist.strings`**。
+
+原因是包里声明了 `CFBundleLocalizations = [zh-Hans]`，本地化字符串会覆盖 `Info.plist` 的同名键。
+克隆时这个文件没改，于是图标换了、名字还是「讲义生成」—— `build.sh` 里的 plist 明明是对的，光看那里永远查不出来。
+
+改完要刷新缓存，否则 Dock 还显示旧名：
+
+```bash
+/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister \
+  -f "/Applications/高三英语作文批改.app"
+killall Dock
+```
+
+验证：看菜单栏名字最快（和气泡同一份字符串）。**别指望用合成鼠标事件去触发 Dock 气泡** ——
+`CGWarpMouseCursorPosition` 和 `CGEvent(.mouseMoved).post(.cghidEventTap)` 都不行，Dock 只认真实硬件事件。
+
+### 6.3 图标加工链（v0.14 新增）
+
+用户自己在别的模型出图，本工程只负责把图变成能用的 icns：
+
+```bash
+python tools/make_icon.py <草稿图.png|jpg> docs/icon/icon-master.png --preview
+python tools/make_icns.py docs/icon/icon-master.png Resources/AppIcon.icns
+./build.sh --install
+```
+
+`make_icon.py` 干的事：裁白边 → 缩到 824（macOS 图标网格，四周留 100 给投影）→ 套超椭圆蒙版
+（n=5，苹果连续圆角）→ 加投影 → 输出 1024 RGBA。
+
+两个坑：**AI 的圆角比苹果更圆**，蒙版要往里缩 `ERODE=24`，否则 AI 边缘那圈浅灰描边会留成白边；
+**别用 `MinFilter` 做内缩**，卷积窗口在图像边界被裁，顶部/底部会留一条半透明带。
+
+### 6.4 主窗口背景（v0.14 换品红）
+
+`EssayApp.swift` 的 `Backdrop`。品红族色值从图标上采的（右上 `#E05769` / 左下 `#A81D5A`），
+但主窗口只做氛围：底色 `#FEFBFC`，晕的透明度浅色 0.075/0.065、深色 0.22/0.20。
+**强调色 `brandBlue` 保持蓝色**，用户 2026-10-26 明确否决过改成品红，不要再提。
+
 ---
 
 ## 7. 产物版式与内容契约
@@ -311,16 +355,19 @@ pandas、matplotlib、openpyxl 之类；脚本要能一次跑完，不要用 inp
 
 ## 8. 待办
 
-1. **图标**（用户 2026-10-26 说「后几轮对话就交代你」）：拿到 `.icns` 后放回 `Resources/AppIcon.icns` 再重编即自动生效
-   —— `build.sh` 已改成「有 icns 才写 `CFBundleIconFile`」，没有就跳过、用系统通用图标。
-   当前 `Resources/AppIcon.icns` **已删除**（原来那份是讲义 app 的，哈希完全相同）。
+1. ~~图标~~ **已完成（2026-10-26，v0.14）**。用户自己在别的模型出图，本工程只负责加工：
+   `tools/make_icon.py`（AI 图 → 1024 RGBA 苹果 squircle + 投影）→ `tools/make_icns.py`（十档尺寸 → icns）。
+   换图标就重跑这两条，然后 `./build.sh --install`。
 2. **【重大升级，慢慢想清楚再动手】上传能力扩展**：pdf / jpg / png / 剪贴板粘贴图片，每框最多 3 个文件，超出提示。
    用户 2026-10-26 明确说「今天不做，但留存记忆，这是重大升级，要慢慢考虑思路框架」。
    牵扯至少三处：`AppState.docTypes` / `chooseFile` 的单选限制 / `Pipeline` 写死的 4 文件结构（`uploads` 数组）。
    还要想清楚：多文件怎么排序、怎么告诉 AI「这几个是一篇的」、粘贴板图片怎么落成临时文件、超限时是拒绝还是排队。
    **不要草率开工。**
-3. **GitHub 仓库 + CI**：workflow 已就位，但用户要求**等第一个完全体可用版本**再建库推 tag ——
-   图标还没上、bug 也没系统测完，现在推不合适。
+3. **GitHub 仓库 + CI**：**已建（2026-10-26）** —— https://github.com/xitihangto/article-correct-app （公开，默认分支 `main`）。
+   推 `v*` 标签会触发 `.github/workflows/release.yml` 自动构建并发布 Release。
+   ⚠️ 推 workflow 文件需要 token 带 `workflow` scope，没有会被 GitHub 拒；本机已用 `gh auth refresh -s workflow` 补上。
+   ⚠️ 打标签前先确认 `build.sh` 的版本号与标签一致，CI 里有一道校验，不一致会直接失败。
+   **v0.14 只推了 main，还没打 tag** —— 等 bug 系统测完再出第一个 Release。
 4. ~~文件名约束~~ **不做**：用户 2026-10-26 说「文件名就这样吧，应该没问题」。
    实测两轮 AI 自拟得都不错（`高三英语写作训练_AI工具与作业_批改与升格_终稿版.docx`、`批改-20261026-2044.docx`）。
 
