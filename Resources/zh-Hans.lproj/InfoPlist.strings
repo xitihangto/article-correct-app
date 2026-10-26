@@ -1,2 +1,6 @@
-"CFBundleName" = "讲义生成";
-"CFBundleDisplayName" = "讲义生成";
+/* Dock 悬停气泡、菜单栏最左边那个菜单名、访达「显示简介」里的名称，都读这里。
+   之前这两个键还是从讲义 app 抄来的「讲义生成」，导致图标换了、名字没换 —— 用户 2026-10-26 报的。
+   注意：Info.plist 里的 CFBundleName 会被本文件覆盖（因为包里声明了 zh-Hans 本地化），
+   所以改 Info.plist 没用，必须改这里。 */
+"CFBundleName" = "高三英语作文批改";
+"CFBundleDisplayName" = "高三英语作文批改";

@@ -898,7 +898,10 @@ final class AppState: ObservableObject {
         if let t = UTType(filenameExtension: "docx") { panel.allowedContentTypes = [t] }
         panel.canCreateDirectories = true
         panel.isExtensionHidden = false
-        if let dir = startDirectory(for: .topic) { panel.directoryURL = dir }
+        // 保存面板固定落在系统「下载」目录，不跟题目文件所在目录走。
+        // 用户预期成品出现在"下载"里；跟着源文件走会让成品散落在各个素材文件夹中。
+        // 注意：chooseFile（打开面板）仍然记着上次的目录，那是另一回事。
+        panel.directoryURL = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first
 
         guard panel.runModal() == .OK, let dest = panel.url else { return }
         let fm = FileManager.default

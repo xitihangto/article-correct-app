@@ -10,11 +10,13 @@ private struct UploadItem {
 extension AppState {
 
     static let promptText = """
-    执行《作文批改规则.md》所规定的内容，版式照《标准模式批改.docx》。因为现在是网页版无法输出文件，请你给出 Python 脚本文件我自己去执行，其他规则不变。
+    我发你 4 个文件，分别是 1.《作文批改规则.md》、2.《标准模式批改.docx》、3.《题目.doc/docx》、4.《作文.doc/docx》，其中 3、4 可能没有严格命名，需要你自行判断哪个是题目，哪个是作文，而且其内容可能是文本也可能是扫描件或者照片插入进 word 文档内，需要你来识别执行（有时候照片会拍进多余的内容需要你提取，其中的作文照片可能有学生的涂改痕迹，你自行判断最终形态，如有手写红笔批改痕迹请忽略）。《作文批改规则.md》所规定的内容，版式照《标准模式批改.docx》，遇见《作文批改规则.md》未明确规定的事项，可以从《标准模式批改.docx》参照模仿。因为现在是网页版无法输出文件，请你给出 Python 脚本文件我自己去执行，其他规则不变。
+
+    注意：《标准模式批改.docx》只作版式与笔调的参照，其中的人物、题目、学生作文、批改意见一律不得沿用；题目和学生作文一律以上传的那两个文件为准。
 
     补充说明（我的运行环境）：Python 3.12，已装好 python-docx，没有其他第三方库，请不要 import pandas、matplotlib、openpyxl 之类；脚本要能一次跑完，不要用 input() 等待键盘输入；最后请用 doc.save('文件名.docx') 保存。
 
-    【格式要求，非常重要】代码的最后一个行必须原样写上这一行注释：
+    【格式要求，非常重要】Python代码的最后一个行必须原样写上这一行注释（#前不要有任何空格）：
     # ===ESSAY-END===
     这一行必须是代码框里的最后一行，它之后不能再有任何代码。这是我用来判断代码是否输出完整的标记，请务必保留、不要改动、不要省略。
 
@@ -123,10 +125,28 @@ extension AppState {
         ]
         var prompt = AppState.promptText
 
-        // 0. 先开一个新对话，避免上一轮的附件和上下文残留
+        // 0. 先开一个新对话，避免上一轮的附件和上下文残留。
+        // 优先点页面上的「开启新对话」按钮（快、不重载）；万一页面改版、按钮文案变了，
+        // JS 会返回 NOT_FOUND，这时退回根地址重载 —— https://chat.deepseek.com/ 后面不带任何
+        // 对话 id，重载出来必然是空白新对话。不检查返回值就会静默复用上一轮的上下文。
         let newChat = try self.js(Scripts.newChat)
         log("新对话：\(newChat)")
-        Thread.sleep(forTimeInterval: 1.5)
+        if newChat.contains("NOT_FOUND") {
+            log("没找到「开启新对话」按钮，改为重载根地址")
+            say("正在准备新对话…", detail: "重置页面中，稍等几秒", running: true)
+            // loadDeepSeek 里有 NSWindow 操作，必须回主线程
+            DispatchQueue.main.async { [weak self] in self?.browser.loadDeepSeek(force: true) }
+            var waited = 0.0
+            while !browser.isPageLoaded && waited < 25 {
+                Thread.sleep(forTimeInterval: 0.5)
+                waited += 0.5
+            }
+            log("页面重载完成，用时 \(waited) 秒")
+            // 文档加载完不等于 SPA 渲染完，再给输入框一点时间
+            Thread.sleep(forTimeInterval: 2.0)
+        } else {
+            Thread.sleep(forTimeInterval: 1.5)
+        }
 
         // 1. 探针：确认输入框和文件框的结构
         // 注：深度思考+智能搜索已在登录成功时由 ensureDeepSeekModes() 处理，

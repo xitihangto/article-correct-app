@@ -652,15 +652,37 @@ struct ContentView: View {
 // MARK: - 背景
 
 struct Backdrop: View {
+    @Environment(\.colorScheme) private var scheme
+
+    /// 品红族的三档，直接从 app 图标上采样来的：
+    /// 图标是「右上 #E05769 浅珊瑚粉 → 左下 #A81D5A 深品红」的斜向渐变。
+    /// 主窗口沿用同一族色相，但把明度提上去、饱和度压下来 —— 整屏铺满高饱和品红会刺眼，
+    /// 这里是背景不是主视觉，颜色只负责「氛围」，卡片和文字才是主角。
+    private static let magentaLight = Color(red: 0.878, green: 0.341, blue: 0.412)  // #E05769
+    private static let magentaDeep  = Color(red: 0.659, green: 0.114, blue: 0.353)  // #A81D5A
+
+    private var isDark: Bool { scheme == .dark }
+
     var body: some View {
         // 用户 2026-10-26 反馈：主背景不要玻璃，背景复杂就看不清。
-        // 主背景恢复原来的实色 + 蓝紫晕，玻璃只留给按钮和圆角框。
+        // 主背景保持实色 + 两团晕，玻璃只留给按钮和圆角框。
         ZStack {
-            Color(nsColor: .windowBackgroundColor)
-            RadialGradient(colors: [Color.brandBlue.opacity(0.16), .clear],
-                           center: .topLeading, startRadius: 20, endRadius: 620)
-            RadialGradient(colors: [Color.brandPurple.opacity(0.14), .clear],
-                           center: .bottomTrailing, startRadius: 20, endRadius: 620)
+            // 浅色下用带一点粉的暖白，而不是纯灰白，否则品红晕会显脏；
+            // 深色下交回系统窗口底色，只叠晕，不然黑底上刷粉会发糊。
+            // 底色本身也往上提了一档（#FDF8FA → #FEFBFC），用户反馈原来的粉「饱和度还是有点高」。
+            if isDark {
+                Color(nsColor: .windowBackgroundColor)
+            } else {
+                Color(red: 0.996, green: 0.984, blue: 0.988)   // #FEFBFC
+            }
+            // 右上浅、左下深，和图标同一个方向，切到 Dock 里看是一套的。
+            // 透明度：浅色 0.075 / 0.065，深色 0.22 / 0.20 —— 深色底上同样的值会看不见。
+            // 浅色这两个值调过一轮：0.12/0.10 出来最深处是 (237,221,227)，肉眼偏「粉窗口」；
+            // 现在最深处约 (248,237,242)，白里透粉，跟「淡雅」的要求对得上。
+            RadialGradient(colors: [Self.magentaLight.opacity(isDark ? 0.22 : 0.075), .clear],
+                           center: .topTrailing, startRadius: 20, endRadius: 620)
+            RadialGradient(colors: [Self.magentaDeep.opacity(isDark ? 0.20 : 0.065), .clear],
+                           center: .bottomLeading, startRadius: 20, endRadius: 620)
         }
         .ignoresSafeArea()
     }
@@ -1055,9 +1077,14 @@ struct WordCard: View {
         .padding(16)
         .frame(maxWidth: .infinity, alignment: .leading)
         .trialGlassCard(cornerRadius: 16, shadowOpacity: active ? 0.08 : 0.02, shadowRadius: active ? 12 : 5)
+        // 卡片 hover 叠层盖在整个卡片上面，包括里面的下载/导出/详情按钮。
+        // 不加 allowsHitTesting(false)，即使填充透明也会挡住鼠标 —— 讲义 app v0.27 修过一模一样的
+        // bug（退出按钮点不动），克隆时这行漏了，下载按钮就点不动。加在叠层内容上、不是整个卡片上，
+        // 否则卡片里的按钮全被禁点；hover 还是靠卡片自己的 onHover，不受影响。
         .overlay(
             RoundedRectangle(cornerRadius: 16, style: .continuous)
                 .fill(Color.brandBlue.opacity(cardHover ? 0.04 : 0))
+                .allowsHitTesting(false)
         )
         .overlay(
             RoundedRectangle(cornerRadius: 16, style: .continuous)

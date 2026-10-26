@@ -35,17 +35,20 @@ def para(doc, align=WD_ALIGN_PARAGRAPH.JUSTIFY, indent=Pt(12), before=0, after=0
 
 
 def h1(doc, text):
-    p = para(doc, WD_ALIGN_PARAGRAPH.LEFT, Pt(0), before=8)
+    """章节标题：12pt 加粗，段前 8pt、段后 0"""
+    p = para(doc, WD_ALIGN_PARAGRAPH.LEFT, Pt(0), before=8, after=0)
     style_run(p.add_run(text), 12, bold=True)
 
 
 def h2(doc, text):
-    p = para(doc, WD_ALIGN_PARAGRAPH.LEFT, Pt(0), before=6)
+    """二级标题：11pt 加粗，段前 6pt、段后 0"""
+    p = para(doc, WD_ALIGN_PARAGRAPH.LEFT, Pt(0), before=6, after=0)
     style_run(p.add_run(text), 11, bold=True)
 
 
-def note(doc, text, align=WD_ALIGN_PARAGRAPH.LEFT, before=0):
-    p = para(doc, align, Pt(0), before=before)
+def note(doc, text, align=WD_ALIGN_PARAGRAPH.LEFT, before=0, after=0):
+    """说明性小字：9pt 斜体"""
+    p = para(doc, align, Pt(0), before=before, after=after)
     style_run(p.add_run(text), 9, italic=True)
 
 
@@ -55,8 +58,15 @@ def body(doc, text, align=WD_ALIGN_PARAGRAPH.JUSTIFY):
     return p
 
 
+def body_flat(doc, text, align=WD_ALIGN_PARAGRAPH.JUSTIFY):
+    """题面里的英文行（Guided Writing / Directions）：顶格不缩进"""
+    p = para(doc, align, Pt(0))
+    style_run(p.add_run(text), 10.5)
+    return p
+
+
 def gap(doc):
-    """章节交界留一个空段落"""
+    """空段落：只在 4 个章节交界 + 纠错|补充意见之间各留一个，共 5 个"""
     doc.add_paragraph()
 
 
@@ -68,29 +78,29 @@ sec.left_margin = sec.right_margin = Cm(2.2)
 sec.header_distance = sec.footer_distance = Cm(1.27)
 
 # 大标题 / 副标题
-p = para(doc, WD_ALIGN_PARAGRAPH.CENTER, Pt(0))
+p = para(doc, WD_ALIGN_PARAGRAPH.CENTER, Pt(0), before=0, after=0)
 style_run(p.add_run("高三英语写作训练《AI 时代的语言学习》批改与升格（终稿版）"), 14, bold=True)
 note(doc, "书信（电子邮件）；黑色原文＋红色＝需改处；小号蓝色〔〕＝终稿与意见的对应编号；"
-          "未标注的句子为原文保留句", align=WD_ALIGN_PARAGRAPH.CENTER)
+          "未标注的句子为原文保留句", align=WD_ALIGN_PARAGRAPH.CENTER, before=2, after=4)
 
-# 一、作文要求
+# 一、作文要求（英文行顶格，中文题面缩进 12pt）
 h1(doc, "一、作文要求")
-body(doc, "IV. Guided Writing (25%)")
-body(doc, "Directions: Write an English composition in 120-150 words according to the instructions "
-          "given below in Chinese.")
+body_flat(doc, "Guided Writing")
+body_flat(doc, "Directions: Write an English composition in 120-150 words according to the "
+               "instructions given below in Chinese.")
 body(doc, "假如你是明启中学高三学生李华，收到国外朋友 Bill 的邮件，说他有打算要好好学习汉语……")
 body(doc, "1. 你的立场")
 body(doc, "2. 你的理由")
 gap(doc)
 
 # 二、学生作文
-h1(doc, "二、学生作文（手写原文完整转录，保留原有语言表达与错误）")
+h1(doc, "二、学生作文（原文完整转录，保留原有语言表达与错误）")
 body(doc, "Dear Bill,")
 body(doc, "I'm thrilled to hear about your interest in learning Chinese. I strongly support you.")
 body(doc, "Firstly, despite the significant strides in AI translation technology, it still lack of "
           "ability to capture the emotion.")
 body(doc, "Yours sincerely,")
-note(doc, "（正文共 34 词；手写原文完整转录，保留原有语言表达与错误；全文无署名。）", before=2)
+note(doc, "（正文共 34 词；全文无署名。）", before=2)
 gap(doc)
 
 # 三、修改意见
@@ -114,6 +124,7 @@ style_run(p.add_run(" to hear about your interest in learning Chinese.　→　�
                     "to hear about your interest in learning Chinese.　说明：thrilled 意为"
                     "“极其兴奋”，朋友只是说想学语言，语域过重，改用 delighted 更贴合书信分寸。"), 10.5)
 
+gap(doc)
 h2(doc, "（二）补充意见（原文没错，是为了充实内容、提升表达而增加的）")
 body(doc, "意1·给“AI 翻不出的东西”一个具体例证　位置：第二段，capture the emotion 之后。"
           "　增加：Take the word “homesick”: no engine can tell you why it stings.　"
@@ -139,12 +150,13 @@ gap(doc)
 
 # 五、参考翻译
 h1(doc, "五、参考翻译")
+note(doc, "（终稿的中文译文，仅供理解改后大意，不作批改依据。）")
 body(doc, "亲爱的比尔：很高兴听说你有兴趣学中文。诚然，人工智能翻译进步很大，但它仍然捕捉不到"
           "语言里的情感——比如“想家”这个词，任何引擎都说不清它为什么让人心里一紧。")
 
-# 文末 OCR 提示行
+# 文末提示行：本稿来源 + 自动纠正的识别错误
 note(doc, "（提示：本稿由电子稿转录。已自动纠正的识别错误：① 原句号后缺空格，终稿已按英文规范"
-          "补齐。以上均不计为批改意见。）", before=6)
+          "补齐。以上均不计为批改意见。）", before=8)
 
 out = "AI时代的语言学习-批改与升格.docx"
 doc.save(out)
