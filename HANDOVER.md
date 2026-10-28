@@ -965,8 +965,22 @@ dist/高三英语作文批改.app/Contents/MacOS/EssayCorrect --pastetypetest   
    推 `v*` 标签会触发 `.github/workflows/release.yml` 自动构建并发布 Release。
    ⚠️ 推 workflow 文件需要 token 带 `workflow` scope，没有会被 GitHub 拒；本机已用 `gh auth refresh -s workflow` 补上。
    ⚠️ 打标签前先确认 `build.sh` 的版本号与标签一致，CI 里有一道校验，不一致会直接失败。
-   **第一个 Release 是 v0.14**（已发，产物 `EssayCorrect-v0.14.zip`，30 MB）。v0.15 / v0.16 只本地编译安装，
-   等用户测完再说要不要发。
+   **已发 Release：v0.14 → v0.21 → v0.22（2026-10-29）**，产物名 `EssayCorrect-v<版本>.zip`（约 30 MB）。
+   v0.15 / v0.16 只本地编译安装，没发。
+   **发布流程**（照着做就行，别漏步骤）：
+   ```bash
+   # 1. 升 build.sh 里的版本号（CFBundleShortVersionString 与 CFBundleVersion 一起改）
+   # 2. 本地构建一次，核对包内版本（CI 校验的就是这个值）
+   ./build.sh
+   /usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' "dist/高三英语作文批改.app/Contents/Info.plist"
+   # 3. 提交 → 打 tag → 一起推（只推 tag 不推 main 会导致 tag 指向旧提交）
+   git add -A && git commit -m "v0.22: …"
+   git tag v0.22
+   git push origin main && git push origin v0.22
+   # 4. 看 CI（约 3–5 分钟），成功后确认 Release 里有 zip
+   gh run watch
+   gh release list
+   ```
 4. ~~文件名约束~~ **不做**：用户 2026-10-26 说「文件名就这样吧，应该没问题」。
    实测两轮 AI 自拟得都不错（`高三英语写作训练_AI工具与作业_批改与升格_终稿版.docx`、`批改-20261026-2044.docx`）。
 
