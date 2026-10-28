@@ -9,31 +9,55 @@ private struct FilePayload {
 
 extension AppState {
 
-    /// 提示词。文件总数按实际附件算，不写死 4 —— 作文可能是 1–3 张图片，
-    /// 加上题目那张，总数会到 5–8 个。告诉 AI 一个不对的数字只会让它犹豫。
-    /// 正文与用户给的 `提示词.txt` 保持一致，只替换了开头的数量。
-    static func promptText(fileCount: Int) -> String {
-        // 常态 4 个；多出来的都是作文的另外几页图片，提前说清楚，省得它当成新文件
-        let lead = fileCount == 4
-            ? "我发你 4 个文件"
-            : "我发你 \(fileCount) 个文件（通常 4 个，多出来的是同一篇作文的另外几页图片）"
-        // 文件多于 4 个时，「3、4」的说法就不够了，往后顺延
-        let naming = fileCount > 4
-            ? "其中第 3 个及之后可能没有严格命名"
-            : "其中 3、4 可能没有严格命名"
-        return """
-        \(lead)，分别是 1.《作文批改规则.md》、2.《标准模式批改.docx》、3.《题目》、4.《作文》，\(naming)，需要你自行判断哪个是题目，哪个是作文，而且其内容可能是文本也可能是扫描件或者照片插入进 word 文档内，甚至直接就是图片，其中作文由于篇幅关系或者试卷换页的缘故，可能是1-3 张图片，需要你来识别（有时候照片会拍进多余的内容需要你提取，其中的《作文》照片可能有学生的涂改痕迹，你自行判断最终形态，如有手写红笔批改痕迹请忽略）。识别全部文件以后，请执行《作文批改规则.md》所规定的内容，版式照《标准模式批改.docx》，遇见《作文批改规则.md》未明确规定的事项，可以从《标准模式批改.docx》参照模仿。因为现在是网页版无法输出文件，请你给出 Python 脚本文件我自己去执行，其他规则不变。
+    /// 提示词。**文件名和角色按实际附件拼，不写死**。
+    ///
+    /// 以前这里写的是「3.《题目》、4.《作文》」两个虚构名字，还让 AI「自行判断哪个是
+    /// 题目、哪个是作文」—— 可代码本来就知道（第 3 个来自题目框，第 4 个起来自作文框），
+    /// 附件条上显示的又是用户自己的文件名（`IMG_3435.jpeg` 之类）。与其让它猜，
+    /// 不如直接把「第几个、叫什么、是什么」写清楚。
+    static func promptText(topicNames: [String], essayNames: [String]) -> String {
+        let total = 2 + topicNames.count + essayNames.count
+        var lines: [String] = []
+        lines.append("我发你 \(total) 个文件，用途如下：")
+        lines.append("1.《作文批改规则.md》—— 批改规则，一切以它为准")
+        lines.append("2.《标准模式批改.docx》—— 版式与笔调的参照样本")
 
-        注意：《标准模式批改.docx》只作版式与笔调的参照，其中的人物、题目、学生作文、批改意见一律不得沿用；题目和学生作文一律以上传的文件为准。
+        // 题目占第 3 个起，作文紧接其后 —— 顺序就是 Pipeline 拼 uploads 的顺序
+        let topicEnd = 2 + topicNames.count
+        if topicNames.isEmpty {
+            lines.append("3.（没有单独的题目文件）")
+        } else {
+            let range = topicEnd == 3 ? "3" : "3–\(topicEnd)"
+            lines.append("\(range).\(Self.quoted(topicNames))—— 题目（来自「题目」框）")
+        }
+        let essayStart = topicEnd + 1
+        if essayNames.isEmpty {
+            lines.append("\(essayStart).（没有单独的作文文件）")
+        } else {
+            let range = essayStart == total ? "\(essayStart)" : "\(essayStart)–\(total)"
+            lines.append("\(range).\(Self.quoted(essayNames))—— 学生作文（来自「作文」框）")
+        }
 
-        补充说明（我的运行环境）：Python 3.12，已装好 python-docx，没有其他第三方库，请不要 import pandas、matplotlib、openpyxl 之类；脚本要能一次跑完，不要用 input() 等待键盘输入；最后请用 doc.save('文件名.docx') 保存。
+        lines.append("")
+        lines.append("""
+        题目和作文的附件名是我自己的文件名，未必叫「题目」「作文」，请以上面的顺序和角色为准。内容可能是纯文本、扫描件、照片插进 word 文档的，也可能直接就是图片。作文常因篇幅或试卷换页拆成多张，这几张是同一篇作文的连续页，请按页序拼成一篇再批改，不要当成多篇。照片可能拍进多余的内容，请自行裁掉；可能有学生的涂改痕迹，以最终形态为准；有手写红笔批改痕迹的，忽略批语，不要把老师的批语当成学生原文。题目文件里如果有多道题，以作文实际内容对应的那道为准。
 
-        【格式要求，非常重要】Python代码的最后一个行必须原样写上这一行注释（#前不要有任何空格）：
+        读完所有文件后，按《作文批改规则.md》执行批改，版式照《标准模式批改.docx》；规则没写到的地方，从样本里参照模仿。样本里的人物、题目、学生作文、批改意见一律不得沿用，题目和作文只以上传的文件为准。因为现在是网页版无法输出文件，请你给出完整的 Python 脚本，我会自动执行；其余一切以《作文批改规则.md》为准。
+
+        补充说明（我的运行环境）：Python 3.12，只装了 python-docx（及其依赖 lxml），没有 pandas、matplotlib、openpyxl、Pillow 之类，请不要 import；脚本要能一次跑完，不要用 input() 等待键盘输入；最后用 save() 把成品存成 .docx，文件名用中文、能看出是哪篇作文。
+
+        【格式要求，非常重要】Python 代码的最后一行必须原样写上这一行注释：
         # ===ESSAY-END===
         这一行必须是代码框里的最后一行，它之后不能再有任何代码。这是我用来判断代码是否输出完整的标记，请务必保留、不要改动、不要省略。
 
-        【收尾说明，同样重要】代码块结束之后，请再写一段简短的中文说明，**至少 3 行、3 行或更多**，讲清楚：这份批改稿有哪几个部分、哪些是红色需改处、哪些是蓝色〔〕编号、纠错与补充意见各几条、终稿多少词。这段说明必须写在代码块外面，不要写进代码里。
-        """
+        【收尾说明，同样重要】代码块结束之后，请再写一段简短的中文说明，至少 3 行，讲清楚：这份批改稿有哪几个部分、哪些是红色需改处、哪些是蓝色〔〕编号、纠错与补充意见各几条、终稿多少词。这段说明必须写在代码块外面，不要写进代码里，也不用教我怎么运行脚本，我会自动执行。
+        """)
+        return lines.joined(separator: "\n")
+    }
+
+    /// `《a》、《b》、《c》`
+    private static func quoted(_ names: [String]) -> String {
+        names.map { "《\($0)》" }.joined(separator: "、")
     }
 
     /// AI 必须在代码末尾打上的结束标记
@@ -168,30 +192,52 @@ extension AppState {
         // 而且 checkNames 是按子串匹配的，重名会互相顶掉 —— 重名时补个序号。
         uploads = dedupeNames(uploads)
 
-        var prompt = AppState.promptText(fileCount: uploads.count)
+        // 提示词里的「第几个是什么」用**去重之后**的名字，跟附件条上显示的一致。
+        // 前两个固定是规则和模板，所以题目从下标 2 起，作文紧接其后。
+        let topicNames = uploads.dropFirst(2).prefix(topicFiles.count).map { $0.name }
+        let essayNames = uploads.dropFirst(2 + topicFiles.count).map { $0.name }
+        var prompt = AppState.promptText(topicNames: topicNames, essayNames: essayNames)
 
-        // 0. 每次运行都重载根地址，保证是空白新对话。
+        // 0. 开新对话。三档，从最省事往下退：
         //
-        // 以前是「先点页面上的『开启新对话』按钮，点不到才重载」。实测从 v0.12 到 v0.20，
-        // 那个按钮**一次都没点中过**（日志里永远是 NOT_FOUND，包括加了 aria-label 兜底之后），
-        // 每次都是走重载兜底 —— 也就是说「点按钮」这条路从来没生效，只是在浪费时间：
-        // 两次无效的 JS 往返 + 0.8 秒空等 + 两行让人以为出错的 NOT_FOUND。
-        // 根地址 https://chat.deepseek.com/ 后面不带任何会话 id，重载出来必然是空白对话，
-        // 这条路反而更硬：不依赖 DOM、不怕改版。代价是每次多 2~4 秒，相对整轮几分钟不算什么。
+        //   ① 页面已经停在根地址 → 什么都不做。App 第一次打开、刚登录、上一轮没发出去，
+        //      都落在这里 —— 本来就是空对话，按 ⌘J 或重载都是多余的。
+        //   ② 停在会话页（/a/chat/s/<id>）→ 按 ⌘J。它只切 SPA 里的会话，不重载页面，
+        //      比 reload 快 2~4 秒，也不用重新等整页渲染。走真实 NSEvent 注入，
+        //      和「继续生成」是同一条路（见 BrowserController.sendCommandKey）。
+        //   ③ ⌘J 按了没反应 / 页面没加载完 → 重载根地址。
+        //
+        // 以前这里是无条件重载根地址，因为「点页面上的『开启新对话』按钮」从 v0.12 到
+        // v0.20 一次都没点中过（选择器永远是 NOT_FOUND）。重载那条路留着当兜底：
+        // 绝不能在旧对话里继续提问，否则上一轮的上下文会污染这一轮的批改。
         say("正在准备新对话…", detail: "重置页面中，稍等几秒", running: true)
-        // loadDeepSeek 里有 NSWindow 操作，必须回主线程。但它是异步的，
-        // 等它跑起来再轮询标志的话，读到的是上一轮的 true —— 循环立刻退出，
-        // 日志里就是「用时 0.0 秒」，等于没等。所以先把标志同步打回 false 再派发。
-        browser.markReloading()
-        DispatchQueue.main.async { [weak self] in self?.browser.loadDeepSeek(force: true) }
-        var waited = 0.0
-        while !browser.isPageLoaded && waited < 25 {
-            Thread.sleep(forTimeInterval: 0.25)
-            waited += 0.25
-        }
-        log("页面重载：\(String(format: "%.1f", waited)) 秒")
-        if !browser.isPageLoaded {
-            log("⚠️ 25 秒内没等到页面加载完成，继续尝试（后面探针会暴露真实状态）")
+
+        switch browser.newChatByShortcut() {
+        case .alreadyFresh:
+            // App 刚启动、刚登录、上一轮没发出去 —— 页面就停在根地址，本来就是空对话。
+            // 这里**什么都不做**，别按 ⌘J 也别重载。
+            log("页面已在根地址，本来就是新对话，跳过重置")
+        case .shortcut(let seconds):
+            log("⌘J 开新对话：\(String(format: "%.1f", seconds)) 秒")
+            // 地址栏变了不代表 DOM 已经换完（SPA 切会话是异步渲染）。
+            // 稍等一下再往里塞附件，免得塞进上一轮那个还没拆掉的输入框。
+            Thread.sleep(forTimeInterval: 1.2)
+        case .failed:
+            log("⌘J 没换掉会话，回退重载根地址")
+            // loadDeepSeek 里有 NSWindow 操作，必须回主线程。但它是异步的，
+            // 等它跑起来再轮询标志的话，读到的是上一轮的 true —— 循环立刻退出，
+            // 日志里就是「用时 0.0 秒」，等于没等。所以先把标志同步打回 false 再派发。
+            browser.markReloading()
+            DispatchQueue.main.async { [weak self] in self?.browser.loadDeepSeek(force: true) }
+            var waited = 0.0
+            while !browser.isPageLoaded && waited < 25 {
+                Thread.sleep(forTimeInterval: 0.25)
+                waited += 0.25
+            }
+            log("页面重载：\(String(format: "%.1f", waited)) 秒")
+            if !browser.isPageLoaded {
+                log("⚠️ 25 秒内没等到页面加载完成，继续尝试（后面探针会暴露真实状态）")
+            }
         }
 
         // didFinish 只说明文档到了，SPA 还没渲染完。以前是固定睡 2 秒赌一把，
@@ -345,12 +391,17 @@ extension AppState {
 
     // MARK: - 等回复 / 抓代码
 
+    /// 等 AI 写完的总上限（秒）。**全 App 只有这一处定义**，改时长只改这里。
+    /// 用户 2026-10-26 定：这个规模 10 分钟就是上限，一到就判失败，不再顺延。
+    /// 上一版把总上限放到 30 分钟，结果一次成功跑了 15 分钟，太长了。
+    private static let replyDeadline: TimeInterval = 600
+
     /// 轮询回复区，直到内容不再变化；期间自动点「继续」
     /// 注意：点了不算数，必须验证页面内容真的涨了，否则记一次无效
-    private func waitForReply(timeout: TimeInterval = 240) throws -> String? {
-        // 用户要求：这个规模 10 分钟就是上限，10 分钟一到直接判失败，不再顺延。
-        // 上一版把总上限放到 30 分钟，结果一次成功跑了 15 分钟，太长了。
-        let deadline = Date().addingTimeInterval(600)
+    private func waitForReply() throws -> String? {
+        // 以前签名上挂了个 `timeout: TimeInterval = 240` 的参数，但函数体压根不读它
+        // （直接写死 600），谁想改时长都会白改。2026-10-27 删掉，只留 replyDeadline。
+        let deadline = Date().addingTimeInterval(Self.replyDeadline)
         // 发送后先给页面一点时间开始动
         Thread.sleep(forTimeInterval: 3.0)
 

@@ -2,6 +2,7 @@ import Foundation
 import AppKit
 import SwiftUI
 import UniformTypeIdentifiers
+import CryptoKit
 
 struct LoginStatus {
     enum Kind {
@@ -92,11 +93,103 @@ struct UploadItem: Identifiable, Equatable {
     /// 是不是「从剪贴板粘进来的图片」。命名序号只数这个，上传的文件不算
     /// （上传的文件自带文件名，见 `AppState.nextPasteName`）。
     var isPaste = false
+    /// 内容指纹：**字节数 + 头 128KB + 尾 128KB 的 SHA-256**。
+    /// 用来判断「同一份文件是不是已经在框里了」—— 同内容不同名字也算重复。
+    /// 读不出内容时是空串，判重时不会误判。
+    var fingerprint = ""
 
     static func == (a: UploadItem, b: UploadItem) -> Bool { a.id == b.id }
 
     var sizeText: String {
         sizeKB >= 1024 ? String(format: "%.1f MB", Double(sizeKB) / 1024) : "\(sizeKB) KB"
+    }
+
+    // MARK: - 指纹与缩略图（用户 2026-10-29 第 9 轮，从「试卷识别」移植）
+
+    /// 算指纹：**只读头尾各 128KB + 字节数**，不把整份文件读进内存。
+    /// 文件小于 256KB 时头尾重叠，等于读全文，反而更准。
+    static func fingerprint(ofFileAt url: URL) -> String? {
+        guard let fh = try? FileHandle(forReadingFrom: url) else { return nil }
+        defer { try? fh.close() }
+        let size = (try? fh.seekToEnd()) ?? 0
+        let chunk: UInt64 = 128 * 1024
+        var sample = Data()
+        try? fh.seek(toOffset: 0)
+        sample.append((try? fh.read(upToCount: Int(chunk))) ?? Data())
+        if size > chunk * 2 {
+            try? fh.seek(toOffset: size - chunk)
+            sample.append((try? fh.read(upToCount: Int(chunk))) ?? Data())
+        }
+        var hasher = SHA256()
+        hasher.update(data: sample)
+        hasher.update(data: Data("\(size)".utf8))
+        let hex = hasher.finalize().map { String(format: "%02x", $0) }.joined()
+        return "\(size)-\(hex)"
+    }
+
+    /// 内存里的 `Data`（剪贴板图片编码出来的 PNG）用同一套算法，
+    /// 结果可以和 `fingerprint(ofFileAt:)` 互相比较。
+    static func fingerprint(of data: Data) -> String {
+        let chunk = 128 * 1024
+        var sample = Data()
+        sample.append(data.prefix(chunk))
+        if data.count > chunk * 2 { sample.append(data.suffix(chunk)) }
+        var hasher = SHA256()
+        hasher.update(data: sample)
+        hasher.update(data: Data("\(data.count)".utf8))
+        let hex = hasher.finalize().map { String(format: "%02x", $0) }.joined()
+        return "\(data.count)-\(hex)"
+    }
+
+    /// 小图缩略图的最大边长（像素）。卡片格子 100pt 上下，360 已经够；
+    /// 再大纯浪费内存和解码时间（原图一张几十 MB 位图）。
+    static let thumbnailMaxPixel = 360
+
+    /// 剪贴板图片落盘成 PNG 前允许的最大边长（像素）。按原尺寸编码大截图又慢又大。
+    static let pasteMaxPixel = 2048
+
+    static func makeThumbnail(url: URL, maxPixel: Int = thumbnailMaxPixel) -> NSImage? {
+        guard let src = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
+        return thumbnail(from: src, maxPixel: maxPixel)
+    }
+
+    static func makeThumbnail(data: Data, maxPixel: Int = thumbnailMaxPixel) -> NSImage? {
+        guard let src = CGImageSourceCreateWithData(data as CFData, nil) else { return nil }
+        return thumbnail(from: src, maxPixel: maxPixel)
+    }
+
+    private static func thumbnail(from src: CGImageSource, maxPixel: Int) -> NSImage? {
+        let opts: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceShouldCacheImmediately: true,
+            kCGImageSourceThumbnailMaxPixelSize: maxPixel,
+        ]
+        guard let cg = CGImageSourceCreateThumbnailAtIndex(src, 0, opts as CFDictionary) else { return nil }
+        return NSImage(cgImage: cg, size: NSSize(width: cg.width, height: cg.height))
+    }
+
+    /// NSImage → CGImage（拿不到就返回 nil，调用方退回老路子）
+    static func cgImage(from image: NSImage) -> CGImage? {
+        var rect = NSRect(origin: .zero, size: image.size)
+        return image.cgImage(forProposedRect: &rect, context: nil, hints: nil)
+    }
+
+    /// 等比缩到长边不超过 `maxPixel`；本来就够小就原样返回。
+    static func downscaled(_ cg: CGImage, maxPixel: Int) -> CGImage {
+        let longSide = max(cg.width, cg.height)
+        guard longSide > maxPixel, longSide > 0 else { return cg }
+        let scale = CGFloat(maxPixel) / CGFloat(longSide)
+        let w = max(1, Int((CGFloat(cg.width) * scale).rounded()))
+        let h = max(1, Int((CGFloat(cg.height) * scale).rounded()))
+        guard let ctx = CGContext(data: nil, width: w, height: h,
+                                  bitsPerComponent: 8, bytesPerRow: 0,
+                                  space: CGColorSpaceCreateDeviceRGB(),
+                                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+        else { return cg }
+        ctx.interpolationQuality = .high
+        ctx.draw(cg, in: CGRect(x: 0, y: 0, width: w, height: h))
+        return ctx.makeImage() ?? cg
     }
 
     /// 从磁盘文件建卡片；扩展名不在白名单里就返回 nil
@@ -107,9 +200,11 @@ struct UploadItem: Identifiable, Equatable {
         self.name = url.lastPathComponent
         let bytes = (try? FileManager.default.attributesOfItem(atPath: url.path))?[.size] as? Int ?? 0
         self.sizeKB = max(bytes / 1024, 1)
+        // 读不出内容就当没有指纹（空串），判重时不会误判成重复
+        self.fingerprint = Self.fingerprint(ofFileAt: url) ?? ""
         if Self.imageExtensions.contains(ext) {
             self.kind = .image
-            self.thumb = NSImage(contentsOf: url)
+            self.thumb = Self.makeThumbnail(url: url)     // 降采样，不再拿原图
         } else {
             self.kind = .document
             self.thumb = nil
@@ -125,12 +220,21 @@ struct UploadItem: Identifiable, Equatable {
     /// 序号就一路涨到 8、9、10，关掉重开也回不到 1（用户 2026-10-27 报的问题）。
     init(image: NSImage, name: String) {
         self.kind = .image
-        self.thumb = image
         self.isPaste = true
-        let png = image.tiffRepresentation
-            .flatMap { NSBitmapImageRep(data: $0) }?
-            .representation(using: .png, properties: [:])
+
+        // ① 先把超长边缩到 2048 再编码 PNG。
+        //    原来直接拿原图 `tiffRepresentation → PNG`，一张 3000×4000 的截图要编码十几 MB，
+        //    粘一张大图要等一两秒 —— 就是这一步。
+        let png: Data? = Self.cgImage(from: image)
+            .map { Self.downscaled($0, maxPixel: Self.pasteMaxPixel) }
+            .flatMap { NSBitmapImageRep(cgImage: $0).representation(using: .png, properties: [:]) }
+
+        // ② 缩略图从这张小 PNG 降采样到 360，不再把原图直接塞进卡片
+        self.thumb = png.flatMap { Self.makeThumbnail(data: $0) } ?? image
         self.sizeKB = max((png?.count ?? 0) / 1024, 1)
+        // 剪贴板图片按落盘后的 PNG 内容算指纹：
+        // 同一张图连着粘两次，序号不同、文件名不同，但内容一模一样 —— 必须判成重复。
+        self.fingerprint = png.map { UploadItem.fingerprint(of: $0) } ?? ""
 
         let url = UploadItem.pasteDirectory.appendingPathComponent("\(name).png")
         try? FileManager.default.createDirectory(at: UploadItem.pasteDirectory,
@@ -972,8 +1076,8 @@ final class AppState: ObservableObject {
             guard let self = self, response == .OK else { return }
             let urls = panel.urls
             guard !urls.isEmpty else { return }
-            // 逐个放进去，放不下的由 addUpload 冒泡说明原因（超数量 / 混放 / 类型不对）
-            for url in urls { self.accept(url, for: slot) }
+            // 和粘贴 / 拖放走**同一套**规则：类型白名单、数量上限、不许混放、内容判重
+            self.acceptBatch(urls, for: slot)
             if let first = urls.first { self.rememberDirectory(first, slot: slot) }
         }
 
@@ -982,14 +1086,6 @@ final class AppState: ObservableObject {
         } else {
             handle(panel.runModal())
         }
-    }
-
-    private func accept(_ url: URL, for slot: Slot) {
-        guard let item = UploadItem(url: url) else {
-            showToast("这个文件类型不支持，只收 doc / docx / pdf / png / jpg", slot: slot)
-            return
-        }
-        if addUpload(item, for: slot) { rememberDirectory(url, slot: slot) }
     }
 
     // MARK: - 上传框内容（文档 / 图片）
@@ -1048,17 +1144,162 @@ final class AppState: ObservableObject {
         return nil
     }
 
-    /// 放进框里。放不进去就弹短提示并返回 false。
+    /// 放进框里的结果（用户 2026-10-29 第 9 轮加 `duplicate`，从「试卷识别」移植）
+    enum AddOutcome { case added, duplicate, rejected }
+
+    /// 这批文件里已经有几个在框里了 —— 统一的一句话
+    func duplicateToast(_ n: Int) -> String {
+        n == 1 ? "这个文件已经在框里了，没有重复添加"
+               : "有 \(n) 个文件已经在框里了，没有重复添加"
+    }
+
+    /// 放进框里。放不进去就弹短提示。
+    /// `quietDuplicate` 为 true 时不冒泡（批量入口自己汇总，见 `acceptBatch`）。
     @discardableResult
-    func addUpload(_ item: UploadItem, for slot: Slot) -> Bool {
+    func addUpload(_ item: UploadItem, for slot: Slot, quietDuplicate: Bool = false) -> AddOutcome {
+        // 判重：内容一样就算重复，**绝不删掉框里原来那个**
+        if isDuplicate(item, in: slot) {
+            if !quietDuplicate { showToast(duplicateToast(1), slot: slot) }
+            return .duplicate
+        }
         if let reason = uploadRejection(for: slot, adding: item.kind) {
             showToast(reason, slot: slot)
-            return false
+            return .rejected
         }
         uploads[slot, default: []].append(item)
         syncLegacyURL(for: slot)
         if !isRunning && progress.tone == .ok { progress = ProgressInfo() }
-        return true
+        return .added
+    }
+
+    /// 框里是不是已经有一份内容相同的了（指纹相同）。
+    /// 指纹为空（读不出内容）时一律当作「不重复」，宁可可重复一次也不要误杀。
+    func isDuplicate(_ item: UploadItem, in slot: Slot) -> Bool {
+        guard !item.fingerprint.isEmpty else { return false }
+        return items(for: slot).contains { $0.fingerprint == item.fingerprint }
+    }
+
+    // MARK: - 一批文件统一入口（粘贴 / 拖放 / 批量选文件共用）
+
+    /// 一批磁盘文件统一入口：**粘贴、拖放、批量选文件共用**，规则完全一致
+    /// （类型白名单 / 数量上限 / 不许混放 / 内容判重）。
+    ///
+    /// 用户 2026-10-29 第 9 轮从「试卷识别」移植。一批里**同时**有重复的和类型不支持的，
+    /// 两个数都要说清楚，别只报一个。
+    ///
+    /// 性能：建卡片要读盘、解码缩略图，十几个文件加起来几百毫秒，放主线程就会"卡一下"。
+    /// 所以在后台线程把卡片全建好（`buildItems`），再一次性交给主线程合并
+    /// （`commitBatch`，**只写一次 `uploads`**）—— 界面只重排一次，不会一格一格地跳。
+    func acceptBatch(_ urls: [URL], for slot: Slot) {
+        guard !urls.isEmpty else { return }
+        if AppState.loadFilesOnMainThread {
+            commitBatch(AppState.buildItems(from: urls), for: slot)
+            return
+        }
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let built = AppState.buildItems(from: urls)
+            DispatchQueue.main.async { self?.commitBatch(built, for: slot) }
+        }
+    }
+
+    /// 自检用开关：把「建卡片」拉回主线程同步做完。正式运行永远走后台。
+    static var loadFilesOnMainThread = false
+
+    /// 一批 URL 建出来的卡片 + 认不出类型的个数
+    struct BuiltBatch {
+        var items: [UploadItem] = []
+        var unsupported = 0
+    }
+
+    /// 只读盘、不碰任何状态：把 URL 变成预览卡片。可以在后台线程跑。
+    static func buildItems(from urls: [URL]) -> BuiltBatch {
+        var batch = BuiltBatch()
+        batch.items.reserveCapacity(urls.count)
+        for url in urls {
+            if let item = UploadItem(url: url) {
+                batch.items.append(item)
+            } else {
+                batch.unsupported += 1        // 类型不在白名单，直接不收
+            }
+        }
+        return batch
+    }
+
+    /// 把一批已经建好的卡片合并进框里：判重 → 查上限/混放 → **一次性 append**。
+    private func commitBatch(_ batch: BuiltBatch, for slot: Slot) {
+        var duplicates = 0
+        var rejection: String?
+        var accepted: [UploadItem] = []
+        // `current` 里同时包含「框里原有的」和「本批前面刚收下的」，
+        // 这样同一批里自己和自己重复的也能拦住。
+        var current = items(for: slot)
+        let caps = AppState.limits(for: slot)
+
+        for item in batch.items {
+            // 判重在最前面：重复的不收，**绝不删掉框里原来那个**
+            if !item.fingerprint.isEmpty,
+               current.contains(where: { $0.fingerprint == item.fingerprint }) {
+                duplicates += 1
+                continue
+            }
+            if let first = current.first, first.kind != item.kind {
+                rejection = first.kind == .image
+                    ? "这个框里已经放了图片，不能再放文档（一个框只放一类）"
+                    : "这个框里已经放了文档，不能再放图片（一个框只放一类）"
+                break
+            }
+            let sameKind = current.reduce(0) { $0 + ($1.kind == item.kind ? 1 : 0) }
+            let cap = item.kind == .image ? caps.images : caps.docs
+            guard sameKind < cap else {
+                rejection = item.kind == .image
+                    ? "最多 \(cap) 张图片，先移除一张再放"
+                    : "文档只能放 1 个，先移除再放"
+                break
+            }
+            current.append(item)
+            accepted.append(item)
+        }
+
+        if !accepted.isEmpty {
+            uploads[slot, default: []].append(contentsOf: accepted)   // ← 整批只写一次
+            syncLegacyURL(for: slot)
+            if !isRunning && progress.tone == .ok { progress = ProgressInfo() }
+        }
+
+        if let rejection {
+            showToast(rejection, slot: slot)
+            return
+        }
+        if duplicates > 0 && batch.unsupported > 0 {
+            showToast("有 \(duplicates) 个已经在框里了、\(batch.unsupported) 个类型不支持，已跳过", slot: slot)
+        } else if duplicates > 0 {
+            showToast(duplicateToast(duplicates), slot: slot)
+        } else if batch.unsupported > 0 {
+            showToast(batch.unsupported == 1
+                      ? "这个文件类型不支持，只收 doc / docx / pdf / png / jpg"
+                      : "有 \(batch.unsupported) 个文件类型不支持，已跳过，只收 doc / docx / pdf / png / jpg",
+                      slot: slot)
+        }
+    }
+
+    /// 把拖进来的 `NSItemProvider` 解析成文件 URL（**保持拖进来的顺序**）。
+    /// 全部回来之后再回调 —— 这样「一次拖 5 个、其中 2 个重复 1 个类型不对」
+    /// 才能只弹一条汇总提示，而不是弹三次。
+    static func resolveFileURLs(from providers: [NSItemProvider],
+                               completion: @escaping ([URL]) -> Void) {
+        guard !providers.isEmpty else { completion([]); return }
+        var slots = [URL?](repeating: nil, count: providers.count)
+        let group = DispatchGroup()
+        for (i, provider) in providers.enumerated() {
+            group.enter()
+            _ = provider.loadObject(ofClass: URL.self) { url, _ in
+                slots[i] = url
+                group.leave()
+            }
+        }
+        group.notify(queue: .main) {
+            completion(slots.compactMap { $0 })
+        }
     }
 
     func removeUpload(_ id: UploadItem.ID, for slot: Slot) {
@@ -1098,35 +1339,42 @@ final class AppState: ObservableObject {
         }
     }
 
-    /// ⌘V：从剪贴板往框里放一个文件或一张图。
-    /// - 剪贴板里有多个文件 → 直接拒绝（用户定的规矩）
-    /// - 恰好一个文件 → 按扩展名收下
-    /// - 没有文件但有图（截图、网页里复制的图）→ 当作图片收下
-    /// 数量 / 种类超限同样拒绝，提示落在被操作的那个框的正中心。
+    /// ⌘V / 右键小菜单：从**系统剪贴板**往框里放一个文件或一张图。
     func pasteFromClipboard(into slot: Slot) {
-        let pb = NSPasteboard.general
+        paste(from: .general, into: slot)
+    }
 
+    /// 真正干活的那一层。剪贴板作为参数传进来，自检就能用一块私有剪贴板，
+    /// 不去动用户自己的剪贴板。
+    ///
+    /// - 剪贴板里有文件（一个或一堆）→ 全部交给 `acceptBatch`，和拖放 / 选文件同一套规则
+    /// - 没有文件但有图（截图、网页里复制的图）→ 当作图片收下
+    /// 数量 / 种类 / 重复同样拒绝，提示落在被操作的那个框的正中心。
+    ///
+    /// ⚠️ **剪贴板里一旦有文件 URL，就走完这个分支直接 return，绝不再往下试 `NSImage(pasteboard:)`**
+    /// （用户 2026-10-29 第 9 轮从「试卷识别」移植过来的致命 bug）：
+    /// `NSImage(pasteboard:)` 会把剪贴板上的**文件 URL 当成图片去解** ——
+    /// 白名单里没有的图片格式（tiff / heic / gif 这些 NSImage 认得的），
+    /// 会先被 `UploadItem(url:)` 拒掉，然后又被这一句解成图片塞进预览框。
+    /// 结果就是「提示了类型不支持，文件却还是进来了」。
+    ///
+    /// 用户 2026-10-29 第 9 轮：原来「一次只能粘 1 个」的规矩撤了 ——
+    /// 拖放已经能一次拖 3 张，粘贴还卡在 1 个就前后不一致了；
+    /// 现在三个入口（粘贴 / 拖放 / 选文件）走的是同一条 `acceptBatch`。
+    func paste(from pb: NSPasteboard, into slot: Slot) {
         let options: [NSPasteboard.ReadingOptionKey: Any] = [.urlReadingFileURLsOnly: true]
         let urls = (pb.readObjects(forClasses: [NSURL.self], options: options) as? [URL]) ?? []
 
-        if urls.count > 1 {
-            showToast("剪贴板里有 \(urls.count) 个文件，一次只能粘贴 1 个", slot: slot)
-            return
-        }
-        if let url = urls.first {
-            guard let item = UploadItem(url: url) else {
-                showToast("这个文件类型不支持，只收 doc / docx / pdf / png / jpg", slot: slot)
-                return
-            }
+        if !urls.isEmpty {
             // 成功放进框里不弹提示 —— 卡片本身就是反馈（用户 2026-10-27 要求：
-            // 只有「类型不对 / 数量超了」这种被拒的情况才冒泡）
-            addUpload(item, for: slot)
-            return
+            // 只有「类型不对 / 数量超了 / 重复了」这种被拒的情况才冒泡）
+            acceptBatch(urls, for: slot)
+            return                     // ← 必须 return：绝不能再落到下面的图片分支
         }
         if let image = NSImage(pasteboard: pb) {
             let item = UploadItem(image: image, name: nextPasteName())
-            // 被拒（数量满了之类）就别在临时目录里留一张没人用的图
-            if !addUpload(item, for: slot), let url = item.url {
+            // 被拒（重复 / 数量满了之类）就别在临时目录里留一张没人用的图
+            if addUpload(item, for: slot) != .added, let url = item.url {
                 try? FileManager.default.removeItem(at: url)
             }
             return

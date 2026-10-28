@@ -2,6 +2,7 @@ import SwiftUI
 import AppKit
 import QuickLookUI
 import PDFKit
+import UniformTypeIdentifiers
 
 // MARK: - 品牌色
 
@@ -98,17 +99,197 @@ struct EssayApp: App {
             exit(exists ? 0 : 1)
         }
 
+        // 自检：重复文件判定（--dedupetest）
+        // 用户 2026-10-29 第 9 轮从「试卷识别」移植：内容一样的文件不许重复放进框里，
+        // 而且**只能丢掉新来的那份，框里原来那个必须留着**。
+        if CommandLine.arguments.contains("--dedupetest") {
+            let dir = URL(fileURLWithPath: NSTemporaryDirectory())
+                .appendingPathComponent("dedupe-test-\(UUID().uuidString)")
+            try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: dir) }
+
+            func write(_ image: NSImage, to name: String) -> URL {
+                let url = dir.appendingPathComponent(name)
+                if let png = image.tiffRepresentation
+                    .flatMap({ NSBitmapImageRep(data: $0) })?
+                    .representation(using: .png, properties: [:]) {
+                    try? png.write(to: url)
+                }
+                return url
+            }
+
+            let images = AppState.demoImages(2)
+            let a = write(images[0], to: "page-1.png")              // 原件
+            let b = write(images[0], to: "复制自 page-1.png")        // 同内容、不同名字
+            let c = write(images[1], to: "page-2.png")              // 不同内容
+
+            let app = AppState()
+            let i1 = UploadItem(url: a)!
+            let i2 = UploadItem(url: b)!
+            let i3 = UploadItem(url: c)!
+
+            var lines: [String] = []
+            lines.append("指纹 a == b（内容同、名字不同）：\(i1.fingerprint == i2.fingerprint)")
+            lines.append("指纹 a != c（内容不同）：        \(i1.fingerprint != i3.fingerprint)")
+            lines.append("加入 a       → \(app.addUpload(i1, for: .essay))")
+            lines.append("加入 b(重复) → \(app.addUpload(i2, for: .essay))")
+            lines.append("加入 c       → \(app.addUpload(i3, for: .essay))")
+            let kept = app.items(for: .essay)
+            lines.append("框里剩下 \(kept.count) 个（应为 2）")
+            lines.append("原来那个还在：\(kept.first?.name == a.lastPathComponent)")
+            FileHandle.standardError.write(Data((lines.joined(separator: "\n") + "\n").utf8))
+
+            let ok = i1.fingerprint == i2.fingerprint
+                && i1.fingerprint != i3.fingerprint
+                && kept.count == 2
+                && kept.first?.name == a.lastPathComponent
+            exit(ok ? 0 : 1)
+        }
+
+        // 自检：粘贴不支持的文件类型，**绝不许进预览框**（--pastetypetest）
+        // 用户 2026-10-29 第 9 轮从「试卷识别」移植过来的致命 bug：
+        // NSImage 认得、但白名单里没有的格式，会先被 `UploadItem(url:)` 拒掉，
+        // 然后又被 `NSImage(pasteboard:)` 解成图片塞进框里。
+        // 这里用一块**私有剪贴板**复现，不动用户自己的剪贴板。
+        if CommandLine.arguments.contains("--pastetypetest") {
+            // 建卡片默认在后台线程做（见 AppState.acceptBatch）；自检要同步读到结果。
+            AppState.loadFilesOnMainThread = true
+            let dir = URL(fileURLWithPath: NSTemporaryDirectory())
+                .appendingPathComponent("paste-type-test-\(UUID().uuidString)")
+            try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: dir) }
+
+            let base = AppState.demoImages(1)[0]
+            let bitmap = NSBitmapImageRep(data: base.tiffRepresentation!)!
+
+            func write(_ type: NSBitmapImageRep.FileType, _ name: String) -> URL {
+                let url = dir.appendingPathComponent(name)
+                if let data = bitmap.representation(using: type, properties: [:]) {
+                    try? data.write(to: url)
+                }
+                return url
+            }
+            let tiff = write(.tiff, "作文.tiff")     // 不支持：NSImage 认，白名单不认
+            let png  = write(.png,  "作文.png")      // 支持
+
+            func run(_ urls: [URL]) -> (count: Int, names: [String], toast: String?) {
+                let app = AppState()
+                let pb = NSPasteboard(name: .init("essay-paste-test-\(UUID().uuidString)"))
+                pb.clearContents()
+                pb.writeObjects(urls.map { $0 as NSURL })
+                app.paste(from: pb, into: .essay)
+                return (app.items(for: .essay).count,
+                        app.items(for: .essay).map(\.name),
+                        app.toast)
+            }
+
+            let bad = run([tiff])
+            let good = run([png])
+
+            // 混合批次：同一批里既有重复、又有类型不支持的，提示必须两件事都说到，
+            // 而且框里只多进合法的那一个。
+            let mixedApp = AppState()
+            func feed(_ list: [URL]) {
+                let pb = NSPasteboard(name: .init("essay-paste-test-\(UUID().uuidString)"))
+                pb.clearContents()
+                pb.writeObjects(list.map { $0 as NSURL })
+                mixedApp.paste(from: pb, into: .essay)
+            }
+            feed([png])                 // 先放一张进去
+            feed([png, tiff])           // 再来：同一张（重复）+ 一个 tiff（不支持）
+
+            var lines: [String] = []
+            lines.append("粘 .tiff → 框里 \(bad.count) 个（应为 0）  文件：\(bad.names)")
+            lines.append("          提示：\(bad.toast ?? "无")")
+            lines.append("粘 .png  → 框里 \(good.count) 个（应为 1）  文件：\(good.names)")
+            lines.append("混合批次 → 框里 \(mixedApp.items(for: .essay).count) 个（应为 1）")
+            lines.append("          提示：\(mixedApp.toast ?? "无")")
+            FileHandle.standardError.write(Data((lines.joined(separator: "\n") + "\n").utf8))
+
+            let mixedToast = mixedApp.toast ?? ""
+            let ok = bad.count == 0
+                && good.count == 1
+                && mixedApp.items(for: .essay).count == 1
+                && mixedToast.contains("已经在框里")
+                && mixedToast.contains("类型不支持")
+            exit(ok ? 0 : 1)
+        }
+
         // 自检：提示词拼装（--prompttest）——不用真跑一遍也能看 AI 收到什么
         if CommandLine.arguments.contains("--prompttest") {
+            // 两组：常态（1 题 1 文）、作文拆成 3 页
+            let cases: [(String, [String], [String])] = [
+                ("1 个题目 + 1 篇作文", ["题目.png"], ["IMG_3435.jpeg"]),
+                ("1 个题目 + 3 页作文", ["2026海淀一模.pdf"], ["p1.jpg", "p2.jpg", "p3.jpg"]),
+            ]
             var out = ""
-            for n in [4, 6] {
-                let text = AppState.promptText(fileCount: n)
-                out += "===== \(n) 个文件 =====\n\(text)\n"
+            for (label, topics, essays) in cases {
+                let text = AppState.promptText(topicNames: topics, essayNames: essays)
+                out += "===== \(label) =====\n\(text)\n"
                 out += "首句: \(text.split(separator: "\n")[0])\n"
                 out += "含结束标记: \(text.contains(AppState.endMarker))\n\n"
             }
             FileHandle.standardError.write(Data(out.utf8))
             exit(0)
+        }
+
+        // 自检：⌘J 开新对话（--keytest）
+        //
+        // 在根地址上按 ⌘J 是看不出效果的（本来就是空对话，URL 也没会话 id）。
+        // 所以先发一句「你好」，等地址栏变成 /a/chat/s/<id>，再按 ⌘J ——
+        // URL 变了才说明页面真的换了会话。
+        if CommandLine.arguments.contains("--keytest") {
+            let browser = BrowserController()
+            DispatchQueue.global().async {
+                func wait(_ s: Double) { Thread.sleep(forTimeInterval: s) }
+                func js(_ code: String) -> String { (try? browser.evaluateSync(code)) ?? "<err>" }
+                func waitURL(_ needle: String, _ limit: Double) -> Bool {
+                    var t = 0.0
+                    while t < limit {
+                        if browser.currentURL.contains(needle) { return true }
+                        wait(0.3); t += 0.3
+                    }
+                    return false
+                }
+
+                DispatchQueue.main.async { browser.loadDeepSeek(force: true) }
+                var t = 0.0
+                while !browser.isPageLoaded && t < 30 { wait(0.25); t += 0.25 }
+
+                var r = 0.0
+                while r < 15 {
+                    if js(Scripts.probeComposer).contains("\"textarea\":true") { break }
+                    wait(0.4); r += 0.4
+                }
+                print("就绪    \(browser.currentURL)")
+
+                // 1. 发一句「你好」，把地址栏变成带会话 id 的样子
+                print("填词    \(js(Scripts.fillText(textJSON: "\"你好\"")))")
+                wait(0.3)
+                print("发送    \(js(Scripts.sendNow))")
+
+                guard waitURL("/a/chat/s/", 20) else {
+                    print("❌ 20 秒内地址栏没出现会话 id：\(browser.currentURL)")
+                    exit(2)
+                }
+                print("会话页  \(browser.currentURL)")
+                let before = browser.currentURL
+
+                // 2. 等这一轮答完（生成中页面可能忽略快捷键）
+                wait(6.0)
+                print("答完    输入框=\(js(Scripts.readText))")
+
+                // 3. 注入 ⌘J
+                DispatchQueue.main.sync { _ = browser.sendCommandKey("j", keyCode: 38) }
+                wait(2.5)
+
+                let after = browser.currentURL
+                print("按前    \(before)")
+                print("按后    \(after)")
+                print(after != before ? "RESULT  = ✅ ⌘J 生效，换了会话"
+                                       : "RESULT  = ❌ URL 没变，⌘J 没被页面接受")
+                exit(0)
+            }
         }
 
         // 脚本执行自检：--runpython /path/to/script.py
@@ -837,6 +1018,8 @@ struct UploadCard: View {
     /// 加号 hover：自绘气泡，`.help()` 有约 1 秒系统延迟，达不到「几乎瞬间冒泡」
     @State private var plusHover = false
     @State private var cardHover = false
+    /// 有文件正被拖到这个框上方（用户 2026-10-29 第 9 轮加拖放）
+    @State private var dropTargeted = false
 
     private var items: [UploadItem] { state.uploads[slot] ?? [] }
     private var armed: Bool { state.pasteArmed == slot }
@@ -849,7 +1032,7 @@ struct UploadCard: View {
     }
 
     private var borderColor: Color {
-        if armed { return Color.brandBlue.opacity(0.75) }
+        if armed || dropTargeted { return Color.brandBlue.opacity(0.75) }
         return Color.secondary.opacity(filled ? 0.22 : 0.28)
     }
 
@@ -874,16 +1057,26 @@ struct UploadCard: View {
                         shadowRadius: filled || armed ? 14 : 6)
         .overlay(
             RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .fill(armed ? Color.brandBlue.opacity(0.06)
+                .fill(armed || dropTargeted ? Color.brandBlue.opacity(0.06)
                             : Color.brandBlue.opacity(cardHover ? 0.03 : 0))
                 .allowsHitTesting(false)
         )
         .overlay(
             // 实线：虚线框在浅色背景上发飘，用户 2026-10-27 明确要求改实线
             RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .strokeBorder(borderColor, lineWidth: armed ? 1.4 : 1)
+                .strokeBorder(borderColor, lineWidth: armed || dropTargeted ? 1.4 : 1)
                 .allowsHitTesting(false)
         )
+        // 拖放（用户 2026-10-29 第 9 轮，从「试卷识别」移植）：
+        // 和粘贴 / 选文件走**完全同一套**规则 —— 类型白名单、数量上限、不许混放、内容判重，
+        // 由 `state.acceptBatch` 统一处理，提示也是同一条汇总文案。
+        .onDrop(of: [.fileURL], isTargeted: $dropTargeted) { providers in
+            guard !state.isRunning, !providers.isEmpty else { return false }
+            AppState.resolveFileURLs(from: providers) { urls in
+                state.acceptBatch(urls, for: slot)
+            }
+            return true
+        }
         .overlay {
             // 右键：激活本框 + 在鼠标位置冒出「粘贴 / 取消」小菜单（用户 2026-10-27）。
             // 窗口失焦时的第一次左键也在这里接（否则会被 AppKit 吞掉），转成「激活」。
@@ -964,7 +1157,9 @@ struct UploadCard: View {
             .overlay(alignment: .center) {
                 if armed {
                     // 右键也能直接粘贴（用户 2026-10-27），文案跟着写全
-                    Text("按 ⌘V 或者右键粘贴，点框外取消")
+                    // 用户 2026-10-29 第 9 轮：后半句「点框外取消」→「或拖入文件」，
+                    // 让新加的拖放功能在激活态里也看得见（字数一样，宽度不变）。
+                    Text("按 ⌘V 或者右键粘贴，或拖入文件")
                         .font(.system(size: 10.5, weight: .medium))
                         .foregroundStyle(Color.brandBlue)
                         .lineLimit(1)
