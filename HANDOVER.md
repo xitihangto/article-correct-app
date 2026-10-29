@@ -1068,7 +1068,9 @@ private func rememberDirectory(_ url: URL, slot: Slot) {
 #### ② 顺手修掉一个真 bug：`build.sh` 签名静默跳过
 
 `codesign` 那行是 `codesign --force --sign - --timestamp=none "$APP" 2>/dev/null || echo "  (签名跳过)"`，
-**没有 `xattr -cr`**（讲义版有，这份克隆时漏了）。增量构建时 `SetFile -a B` 写进去的 FinderInfo
+**没有 `xattr -cr`**。查过三个 App（试卷识别 / 讲义生成 / 作文批改），**build.sh 里都没有这一行** ——
+不是克隆时漏的，是从来没写过；讲义那边只是碰巧没复现（取决于 `dist/` 里有没有残留的 FinderInfo）。
+增量构建时 `SetFile -a B` 写进去的 FinderInfo
 会让 `codesign` 报 `resource fork, Finder information, or similar detritus not allowed`，
 被 `2>/dev/null` 吞掉、只剩一句「(签名跳过)」——**看起来正常，实际没签**。
 
@@ -1077,6 +1079,7 @@ private func rememberDirectory(_ url: URL, slot: Slot) {
 都是按 Identifier 分域的** —— 这正是「目录记不住」的上游原因之一，也随时可能让登录态丢失。
 
 修法：签名前加 `xattr -cr "$APP"`，并把 `2>/dev/null` 去掉、失败提示改成可见的警告。
+**讲义版的 `build.sh` 也一并补上了**（同一个坑，只是没发作），两处改法完全一致。
 修完核对：
 
 ```
@@ -1178,6 +1181,7 @@ CodeDirectory v=20400 flags=0x2(adhoc) hashes=145+3 location=embedded
 | 粘贴被拒的文件还是进了框（2026-10-29 修） | 提示「类型不支持」，框里却多出一张图 | `paste` 的文件分支处理完没有 `return`，继续落到 `NSImage(pasteboard:)` —— 它会把文件 URL 当图片解。**文件分支必须无条件 return** |
 | 一次加十几个文件卡住（2026-10-29 修） | 卡片一张张往外蹦，界面僵住几百毫秒 | 三个原因：①缩略图拿的是整张原图（48MB/张）；②判重把整份文件读进内存；③每收一个就 `uploads.append`，N 次 @Published = N 轮全卡片重绘。现在：降采样 360px + 只读头尾 128KB + 后台建卡片 + 整批写一次 |
 | `sed -i ''` / `grep` 带 `\|` 在本会话里失灵 | `sed: s|...|: No such file or directory`、grep 明明有却返回空 | 本机这个 shell 环境下 BSD `sed -i ''` 和多模式 `grep` 都不可靠。改文件用 Edit 工具；非要命令行就 `python3 - <<EOF`。查中文串加 `LC_ALL=en_US.UTF-8`，且用 `grep -E` 别用 `\|` |
+| **`codesign` 静默跳过，bundle id 悄悄变了**（2026-10-29 修） | 构建日志只有一句「(签名跳过)」，看起来正常；`codesign -dv` 显示 `flags=0x20002(adhoc,linker-signed)`、`Info.plist=not bound`、`Identifier=EssayCorrect` 而不是 `com.workbuddy.essaycorrect` | 增量构建时 `SetFile -a B` 写进去的 FinderInfo 让 codesign 报 `resource fork, Finder information, or similar detritus not allowed`，又被 `2>/dev/null` 吞掉。**后果很隐蔽**：`UserDefaults` 和 WKWebView 的 cookie 都按 Identifier 分域，于是偏好全丢、登录态丢失。修法：签名前 `xattr -cr "$APP"`，**并且不要 `2>/dev/null`**（失败必须看得见）。查体：`codesign -dv` 的 `Identifier` 必须等于 `Info.plist` 里的 `CFBundleIdentifier` |
 
 ---
 
