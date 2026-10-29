@@ -361,6 +361,10 @@ struct WindowCloseAccessor: NSViewRepresentable {
                 // 标题栏只留红绿灯，不显示“高三英语作文批改”几个字（和界面内大标题重复）。
                 // 只隐藏标题栏文字，不改窗口本身的标题，Dock 菜单里的窗口名还在。
                 window.titleVisibility = .hidden
+                // 系统的分割线在这套「隐藏标题 + 透明标题栏」的窗口上压不住（只 hover 才出现），
+                // 所以界面里自己画了一条常驻的（见 ContentView 的 .overlay(alignment: .top)）。
+                // 这里把系统的关掉，免得上下一共两条线。做法照抄试卷识别版。
+                window.titlebarSeparatorStyle = .none
             }
         }
         return view
@@ -370,6 +374,7 @@ struct WindowCloseAccessor: NSViewRepresentable {
             if let window = nsView.window {
                 window.delegate = ExitConfirmWindowDelegate.shared
                 window.titleVisibility = .hidden
+                window.titlebarSeparatorStyle = .none
             }
         }
     }
@@ -468,6 +473,19 @@ struct ContentView: View {
             }
         }
         .frame(width: 620, height: 720)
+        // 标题栏（红绿灯那条）下面的分割线 —— **自己画一条，常驻**（照抄试卷识别版）。
+        //
+        // 为什么不用系统的 `titlebarSeparatorStyle = .line`：那个属性在本窗口上不生效。
+        // 窗口为了只留红绿灯，把 `titleVisibility` 设成了 `.hidden`，
+        // 这种「标题栏透明、内容顶到窗口顶部」的形态下，系统只在滚动/鼠标悬停时才画那条线
+        // （`.automatic` 的表现），`.line` 也压不住。与其跟系统猜，不如自己画一条 1px 的，
+        // 位置正好在内容区最顶端 = 标题栏底边，颜色用系统的 `.separatorColor`，明暗自适应。
+        .overlay(alignment: .top) {
+            Rectangle()
+                .fill(Color(nsColor: .separatorColor))
+                .frame(height: 1)
+                .allowsHitTesting(false)
+        }
         .background(WindowCloseAccessor())
         .onAppear {
             state.startPolling()
@@ -744,11 +762,17 @@ struct ContentView: View {
                                    startPoint: .leading, endPoint: .trailing)
                 )
 
-            Text("上传作文题目与学生作文，Word、PDF 或图片均可，自动生成红笔批注、纠错清单与升格终稿。生成约需 1–3 分钟。")
+            // 用户 2026-10-29：这行原来会折成两行，要求「改为一行但意思不变」。
+            // 做法是把两处啰嗦的地方收紧：①「作文题目与学生作文」→「题目与作文」（语境里不会误解）
+            // ②「Word、PDF 或图片均可」→ 括号里的「（Word/PDF/图片）」
+            // ③句号改逗号，把「生成约需」并进最后一句。信息一项没少。
+            Text("上传题目与作文（Word/PDF/图片），自动生成红笔批注、纠错清单与升格终稿，约 1–3 分钟。")
                 .font(.system(size: 12))
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
-                .fixedSize(horizontal: false, vertical: true)
+                // 万一哪天字号或字体微调让它又超了，宁可缩一点点也不要折行
+                .lineLimit(1)
+                .minimumScaleFactor(0.9)
                 .padding(.horizontal, 10)
         }
         .frame(maxWidth: .infinity)

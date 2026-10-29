@@ -1169,6 +1169,49 @@ func log(_ line: String) {
 
 ---
 
+### 6.18 ⏳ 标题文案压成一行 + 标题栏分割线固化（2026-10-29，**临时记录，待推送**）
+
+用户要求：「作文 app 第二行灰色文案改为一行但意思不变；作文与讲义 app 标题栏分割线固化（直接照抄 exam）」。
+
+#### ① 标题下的说明压成一行
+
+原来 57 个字，在 620 宽的窗口里必然折成两行。用户要求**意思不变**地压成一行，
+所以只收紧三处啰嗦，信息一项没删：
+
+| 原文 | 改后 |
+|---|---|
+| 上传**作文题目与学生作文**，**Word、PDF 或图片均可**，自动生成…**。生成约需** 1–3 分钟。 | 上传**题目与作文（Word/PDF/图片）**，自动生成…**，约** 1–3 分钟。 |
+
+再加 `.lineLimit(1)` + `.minimumScaleFactor(0.9)` 兜底 —— 万一以后字号或字体微调让它又超了，
+宁可缩一点点也不要折行。
+
+#### ② 标题栏分割线固化
+
+原来本工程只有 `window.titleVisibility = .hidden`，**没有** `titlebarSeparatorStyle = .none`，
+也没有自己画线 —— 红绿灯下面那条线完全靠系统，只在滚动 / 鼠标悬停时才出现。
+
+照抄试卷识别版两步：
+
+1. `WindowCloseAccessor` 的 **make 和 update 两处**都加 `window.titlebarSeparatorStyle = .none`
+2. `ContentView` 在 `.frame(width: 620, height: 720)` 之后加：
+
+```swift
+.overlay(alignment: .top) {
+    Rectangle()
+        .fill(Color(nsColor: .separatorColor))
+        .frame(height: 1)
+        .allowsHitTesting(false)
+}
+```
+
+**为什么不用 `titlebarSeparatorStyle = .line`**：窗口为了只留红绿灯把 `titleVisibility` 设成了
+`.hidden`，这种「标题栏透明、内容顶到窗口顶部」的形态下系统只按 `.automatic` 走，`.line` 压不住。
+自己画一条 1px 的，位置正好在内容区最顶端 = 标题栏底边，颜色用系统 `.separatorColor` 明暗自适应。
+
+**版本**：未升版，**未推 GitHub**。
+
+---
+
 ## 7. 产物版式与内容契约
 
 **版式、五段结构、字号颜色、禁止项，全部以 `Resources/作文批改规则.md` 为准，本文不复制。**
@@ -1234,6 +1277,8 @@ func log(_ line: String) {
     ②`git push origin main` + `git push origin vX.Y` ③把 §6.16 标题里的「⏳ 临时记录，待推送」去掉、
     改成正式记录 ④删掉本条待办
 - [ ] **「详情」链路对齐试卷识别版**（改动见 §6.17，已编译安装，未推 GitHub）
+  - 推送时要做：同上四步
+- [ ] **标题文案压成一行 + 标题栏分割线固化**（改动见 §6.18，已编译安装，未推 GitHub）
   - 推送时要做：同上四步
 
 > ~~成品体检器（机器校验段前距 / keepNext / 色值 / 编号集合）~~ **用户已明确否决（2026-10-26）**：
