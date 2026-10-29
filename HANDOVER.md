@@ -1068,8 +1068,8 @@ private func rememberDirectory(_ url: URL, slot: Slot) {
 #### ② 顺手修掉一个真 bug：`build.sh` 签名静默跳过
 
 `codesign` 那行是 `codesign --force --sign - --timestamp=none "$APP" 2>/dev/null || echo "  (签名跳过)"`，
-**没有 `xattr -cr`**。查过三个 App（试卷识别 / 讲义生成 / 作文批改），**build.sh 里都没有这一行** ——
-不是克隆时漏的，是从来没写过；讲义那边只是碰巧没复现（取决于 `dist/` 里有没有残留的 FinderInfo）。
+**没有 `xattr -cr`**。查了三个 App：**试卷识别版有**（它是最早踩到这个坑的，`build.sh` 里带着注释），
+**讲义和作文都是从它那套骨架克隆/回灌时漏掉的** —— 所以这条不能靠「照上一份复制」，每份都得单独查。
 增量构建时 `SetFile -a B` 写进去的 FinderInfo
 会让 `codesign` 报 `resource fork, Finder information, or similar detritus not allowed`，
 被 `2>/dev/null` 吞掉、只剩一句「(签名跳过)」——**看起来正常，实际没签**。
