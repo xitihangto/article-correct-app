@@ -1110,6 +1110,65 @@ CodeDirectory v=20400 flags=0x2(adhoc) hashes=145+3 location=embedded
 
 ---
 
+### 6.17 ⏳ 「详情」链路对齐试卷识别版（2026-10-29，**临时记录，待推送**）
+
+用户要求：「检查讲义和文章 app 的详情按钮的背后代码逻辑，是否和 exam 一样，如果不一样，重写」。
+逐行比过三个 App 之后，**大体一样、三处不一样**，已按试卷版补齐。
+
+#### 一样的部分（不动）
+
+- 「详情」按钮：位置（Word 卡标题行）、`text.alignleft` 图标 9pt + 文案 11pt、
+  胶囊底 + hover 叠层、`state.showLog ? "收起" : "详情"`、`help` 文案、
+  **只在 `!progressLines.isEmpty` 时出现**
+- `openLog` / `closeLog` / `toggleLog` 三个方法（`easeOut(0.18)` + 动画）
+- `LogPanel` 骨架：压暗层只铺上半屏（**不许盖住自己的开关**）、点压暗层关闭、点叉关闭、
+  `Esc` 关闭（在 `installPasteMonitor` 的 `keyDown` 里，顺序：关日志 → 关预览 → 退粘贴）
+- 日志列表：等宽 10.5pt、`textSelection(.enabled)`、`onAppear` + `onReceive($progressLines)` 自动滚到底、
+  `tint()` 着色规则（`✗` 红、`⚠️` / `还没出现` 橙、其余正文色）
+- `docx` 的 `didSet`：失败时往日志补一行 `✗ 生成失败：…`
+- 失败时只改一行字、不换按钮、不弹面板、不导 md/截图
+
+#### 不一样的两处（已补齐）
+
+| 项 | 试卷识别 | 文章（改前） | 处理 |
+|---|---|---|---|
+| `log()` 时间戳 + 间隔 | ✅ `HH:mm:ss +N.Ns` | ❌ 裸文本 | **补齐** |
+| LogPanel「复制全部」 | ✅ | ❌ | **补齐** |
+| `autoOpenLogWhileTesting` | ✅（`false`） | ❌ | **补齐**（默认 false，行为无变化） |
+
+面板尺寸本来就是 566×516 / 压暗层 548，和试卷版一致，不用动
+（讲义那边是 500 / 520，另见讲义 HANDOVER §5.30）。
+
+#### ① `log()` 加时间戳
+
+```swift
+var lastLogAt: Date?
+private static let logClock: DateFormatter = { … "HH:mm:ss" … }()
+
+func log(_ line: String) {
+    …
+    var prefix = Self.logClock.string(from: now)
+    if let last = lastLogAt { prefix += String(format: " +%4.1fs", now.timeIntervalSince(last)) }
+    lastLogAt = now
+    progressLines.append("\(prefix) \(line)")
+}
+```
+
+`runPipeline()` 开头加 `lastLogAt = nil` —— 新一轮从零计时，别把上一轮的间隔带过来。
+
+这是试卷版 2026-10-29 上午为了定位「上传慢」加的：没有时间戳只能看到一长串步骤，
+看不出哪一步吃掉了时间。文章这边一直没跟上，属于「排查能力缺失」。
+
+#### ② LogPanel 加「复制全部」
+
+每行是独立 `Text`，SwiftUI 的跨行拖选会被打断，只能一行一行选 —— 用户要截图两次以上才拿得全。
+按钮：白底胶囊 + 深色字，点完 1.6 秒显示「已复制」；没有日志时禁用并降到 0.45 透明度。
+`copyAll()` 把日志行 + 空行 + `—— 脚本输出 ——` + 脚本输出拼起来塞剪贴板，顺序和界面一致。
+
+**版本**：未升版，**未推 GitHub**。
+
+---
+
 ## 7. 产物版式与内容契约
 
 **版式、五段结构、字号颜色、禁止项，全部以 `Resources/作文批改规则.md` 为准，本文不复制。**
@@ -1174,6 +1233,8 @@ CodeDirectory v=20400 flags=0x2(adhoc) hashes=145+3 location=embedded
   - 推送时要做：①升 `build.sh` 里的 `CFBundleShortVersionString` / `CFBundleVersion`
     ②`git push origin main` + `git push origin vX.Y` ③把 §6.16 标题里的「⏳ 临时记录，待推送」去掉、
     改成正式记录 ④删掉本条待办
+- [ ] **「详情」链路对齐试卷识别版**（改动见 §6.17，已编译安装，未推 GitHub）
+  - 推送时要做：同上四步
 
 > ~~成品体检器（机器校验段前距 / keepNext / 色值 / 编号集合）~~ **用户已明确否决（2026-10-26）**：
 > 格式细节不重要，只要正文批改质量好就行。**不要再提议加这个**，也不要拿格式偏差当失败判据。
