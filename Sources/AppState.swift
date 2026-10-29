@@ -1035,6 +1035,9 @@ final class AppState: ObservableObject {
     }
 
     /// 上次选文件的目录：优先本框自己的，其次另一个框的，最后下载目录
+    ///
+    /// 第 16 轮之后两个框的键恒等（选一次两边都写），所以「本框优先」实际上只是容错：
+    /// 万一某个键指向的目录被删掉或挪走了，还能退到另一个键 / 共享键 / 下载目录。
     private func startDirectory(for slot: Slot) -> URL? {
         let ud = UserDefaults.standard
         let otherKey = AppState.dirKey(slot == .topic ? .essay : .topic)
@@ -1050,10 +1053,18 @@ final class AppState: ObservableObject {
         return FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first
     }
 
+    /// 记住这次选文件的目录，并**同步给另一个框**（用户 2026-10-29 第 16 轮）。
+    ///
+    /// 两个框的「上次目录」永远保持一致：框 1 换了目录，框 2 下次打开面板就直接落在同一个目录，
+    /// 不用再导航一遍。写进 `UserDefaults`，所以关掉 App 重开也还记得；
+    /// 直到用户又选了别的目录，再重新同步一次。
     private func rememberDirectory(_ url: URL, slot: Slot) {
         let dir = url.deletingLastPathComponent().path
         let ud = UserDefaults.standard
         ud.set(dir, forKey: AppState.dirKey(slot))
+        // 另一个框立刻继承同一个目录 —— 这是本条需求的关键，不能只写本框的键
+        ud.set(dir, forKey: AppState.dirKey(slot == .topic ? .essay : .topic))
+        // 老版本留下的共享键，继续写，免得别处还读它时值不一致
         ud.set(dir, forKey: "pickDir.shared")
     }
 
@@ -1076,9 +1087,11 @@ final class AppState: ObservableObject {
             guard let self = self, response == .OK else { return }
             let urls = panel.urls
             guard !urls.isEmpty else { return }
+            // 先记目录再收文件：哪怕这批文件全被拒（类型不对 / 超上限），
+            // 用户「导航到了哪个目录」这个事实也该记住，并同步给另一个框（第 16 轮）。
+            self.rememberDirectory(urls[0], slot: slot)
             // 和粘贴 / 拖放走**同一套**规则：类型白名单、数量上限、不许混放、内容判重
             self.acceptBatch(urls, for: slot)
-            if let first = urls.first { self.rememberDirectory(first, slot: slot) }
         }
 
         if let window = NSApp.keyWindow ?? NSApp.mainWindow {

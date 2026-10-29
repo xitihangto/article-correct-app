@@ -1033,6 +1033,65 @@ dist/高三英语作文批改.app/Contents/MacOS/EssayCorrect --pastetypetest   
 
 ---
 
+### 6.16 ⏳ 上传框目录互相同步 + 修签名静默跳过（2026-10-29，**临时记录，待推送**）
+
+> 用户第 16 轮要求：先编译、记待办，等他说推的时候一起推；**推送后本节改成正式记录并删掉 §8 的待办**。
+
+#### ① 目录互相同步（需求本体）
+
+两个上传框（作文题目 / 学生作文）的「上次打开面板的目录」必须互相同步 ——
+在框 1 里选定了目录和文件，框 2 下次打开面板要直接落在同一个目录；
+关掉 App 重开还记得；直到用户又选了别的目录，再重新同步一次。
+
+**原来的问题**：`AppState.rememberDirectory` 只写本框的键（`pickDir.topic` / `pickDir.essay`）
+和老的共享键 `pickDir.shared`，**不写另一个框的键**。而 `startDirectory` 是
+「本框优先 → 另一个框 → 共享 → 下载目录」——只要另一个框自己记过目录，本框就永远继承不到新的。
+
+**改法**（`Sources/AppState.swift`）：
+
+```swift
+private func rememberDirectory(_ url: URL, slot: Slot) {
+    let dir = url.deletingLastPathComponent().path
+    let ud = UserDefaults.standard
+    ud.set(dir, forKey: AppState.dirKey(slot))
+    ud.set(dir, forKey: AppState.dirKey(slot == .topic ? .essay : .topic))  // ← 新增：另一个框立刻继承
+    ud.set(dir, forKey: "pickDir.shared")
+}
+```
+
+两个键从此恒等，「本框优先」退化成纯容错（某个目录被删/挪走时还能退到别处）。
+`startDirectory` 逻辑没动。
+
+另外把 `chooseFile` 的回调改成**先记目录、再收文件**（原来是 `acceptBatch` 之后才记）：
+哪怕这批文件全被拒（类型不对 / 超上限），「用户导航到了哪个目录」这个事实也该记住并同步。
+
+#### ② 顺手修掉一个真 bug：`build.sh` 签名静默跳过
+
+`codesign` 那行是 `codesign --force --sign - --timestamp=none "$APP" 2>/dev/null || echo "  (签名跳过)"`，
+**没有 `xattr -cr`**（讲义版有，这份克隆时漏了）。增量构建时 `SetFile -a B` 写进去的 FinderInfo
+会让 `codesign` 报 `resource fork, Finder information, or similar detritus not allowed`，
+被 `2>/dev/null` 吞掉、只剩一句「(签名跳过)」——**看起来正常，实际没签**。
+
+后果：bundle 只剩 linker-signed，`Identifier` 变成可执行文件名 `EssayCorrect`，
+不再是 `com.workbuddy.essaycorrect`。**而 `UserDefaults` 和 WKWebView 的 cookie
+都是按 Identifier 分域的** —— 这正是「目录记不住」的上游原因之一，也随时可能让登录态丢失。
+
+修法：签名前加 `xattr -cr "$APP"`，并把 `2>/dev/null` 去掉、失败提示改成可见的警告。
+修完核对：
+
+```
+Identifier=com.workbuddy.essaycorrect
+CodeDirectory v=20400 flags=0x2(adhoc) hashes=145+3 location=embedded
+```
+
+`~/Library/WebKit/com.workbuddy.essaycorrect`、`~/Library/Caches/com.workbuddy.essaycorrect`、
+`HTTPStorages/com.workbuddy.essaycorrect.binarycookies` 都还在，**登录态没丢**。
+
+**版本**：未升版（按 §5.6 版本纪律，日常改动沿用当前版本号，用户说发布才升）。
+本地已 `./build.sh --install`，**未推 GitHub**。
+
+---
+
 ## 7. 产物版式与内容契约
 
 **版式、五段结构、字号颜色、禁止项，全部以 `Resources/作文批改规则.md` 为准，本文不复制。**
@@ -1090,6 +1149,13 @@ dist/高三英语作文批改.app/Contents/MacOS/EssayCorrect --pastetypetest   
    ```
 4. ~~文件名约束~~ **不做**：用户 2026-10-26 说「文件名就这样吧，应该没问题」。
    实测两轮 AI 自拟得都不错（`高三英语写作训练_AI工具与作业_批改与升格_终稿版.docx`、`批改-20261026-2044.docx`）。
+
+### ⏳ 待推送（用户 2026-10-29 第 16 轮：先编译、先记着，等他说推再一起推）
+
+- [ ] **上传框目录互相同步 + `build.sh` 补 `xattr -cr`**（改动见 §6.16，已编译安装，未推 GitHub）
+  - 推送时要做：①升 `build.sh` 里的 `CFBundleShortVersionString` / `CFBundleVersion`
+    ②`git push origin main` + `git push origin vX.Y` ③把 §6.16 标题里的「⏳ 临时记录，待推送」去掉、
+    改成正式记录 ④删掉本条待办
 
 > ~~成品体检器（机器校验段前距 / keepNext / 色值 / 编号集合）~~ **用户已明确否决（2026-10-26）**：
 > 格式细节不重要，只要正文批改质量好就行。**不要再提议加这个**，也不要拿格式偏差当失败判据。
