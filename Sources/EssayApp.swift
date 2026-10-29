@@ -1204,7 +1204,9 @@ struct UploadCard: View {
         // 有文件时 / 已经在等粘贴时 / 正在跑的时候都不显示。
         .overlay(alignment: .center) {
             if items.isEmpty && !armed && !state.isRunning {
-                Text("点击此处可粘贴")
+                // 用户 2026-10-29：文案漏了「拖入」——拖放早就支持了（见 acceptBatch），
+                // 但空框上只写了粘贴，用户看不出来还能拖。和试卷识别版保持一致。
+                Text("点击此处可粘贴，或将文件拖入")
                     .font(.system(size: 14))
                     .foregroundStyle(.secondary)
                     .allowsHitTesting(false)

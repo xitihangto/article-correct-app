@@ -1033,7 +1033,7 @@ dist/高三英语作文批改.app/Contents/MacOS/EssayCorrect --pastetypetest   
 
 ---
 
-### 6.16 ⏳ 上传框目录互相同步 + 修签名静默跳过（2026-10-29，**临时记录，待推送**）
+### 6.16 ⏳ 上传框目录互相同步 + 空框文案补「拖入」+ 修签名静默跳过（2026-10-29，**临时记录，待推送**）
 
 > 用户第 16 轮要求：先编译、记待办，等他说推的时候一起推；**推送后本节改成正式记录并删掉 §8 的待办**。
 
@@ -1065,7 +1065,22 @@ private func rememberDirectory(_ url: URL, slot: Slot) {
 另外把 `chooseFile` 的回调改成**先记目录、再收文件**（原来是 `acceptBatch` 之后才记）：
 哪怕这批文件全被拒（类型不对 / 超上限），「用户导航到了哪个目录」这个事实也该记住并同步。
 
-#### ② 顺手修掉一个真 bug：`build.sh` 签名静默跳过
+#### ② 空框文案补上「拖入」
+
+用户 2026-10-29 指出「文案少了拖入」。拖放早在 §6.14 就接好了（`acceptBatch` 统一入口），
+但空框上那句话只写了粘贴，用户根本看不出来还能拖。
+
+`EssayApp.swift` 空框提示：
+
+```
+- 点击此处可粘贴
++ 点击此处可粘贴，或将文件拖入
+```
+
+和试卷识别版同一句，保持一致。加号 hover 气泡「点击此处上传文件」不动 —— 它说的是「点加号」这个动作，
+和拖入不是一回事。
+
+#### ③ 顺手修掉一个真 bug：`build.sh` 签名静默跳过
 
 `codesign` 那行是 `codesign --force --sign - --timestamp=none "$APP" 2>/dev/null || echo "  (签名跳过)"`，
 **没有 `xattr -cr`**。查了三个 App：**试卷识别版有**（它是最早踩到这个坑的，`build.sh` 里带着注释），
@@ -1155,7 +1170,7 @@ CodeDirectory v=20400 flags=0x2(adhoc) hashes=145+3 location=embedded
 
 ### ⏳ 待推送（用户 2026-10-29 第 16 轮：先编译、先记着，等他说推再一起推）
 
-- [ ] **上传框目录互相同步 + `build.sh` 补 `xattr -cr`**（改动见 §6.16，已编译安装，未推 GitHub）
+- [ ] **上传框目录互相同步 + 空框文案补「拖入」+ `build.sh` 补 `xattr -cr`**（改动见 §6.16，已编译安装，未推 GitHub）
   - 推送时要做：①升 `build.sh` 里的 `CFBundleShortVersionString` / `CFBundleVersion`
     ②`git push origin main` + `git push origin vX.Y` ③把 §6.16 标题里的「⏳ 临时记录，待推送」去掉、
     改成正式记录 ④删掉本条待办
