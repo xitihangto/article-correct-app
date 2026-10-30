@@ -1208,6 +1208,63 @@ func log(_ line: String) {
 
 **版本**：未升版，**未推 GitHub**。
 
+### 6.19 圈号 ①②③ 和全角标点必须算中文（2026-10-30）
+
+**用户报的现象**：批改说明里圈起来的阿拉伯数字（①②③）以及其他全角中文符号，成品里显示成
+Times New Roman，跟旁边正文的宋体明显不是一套。
+
+**根因不在「AI 忘了设宋体」，在 `w:hint`。** Word 给每个 run 的字体留了四个槽：
+
+| 槽 | 管什么 |
+|---|---|
+| `w:ascii` | 基本拉丁字符 |
+| `w:hAnsi` | 拉丁扩展（带音标的西欧字母等） |
+| `w:eastAsia` | 东亚字符（汉字、假名、谚文） |
+| `w:hint` | **既不算纯西文、也不算纯东亚的「歧义宽度」字符，按哪个槽取字体** |
+
+圈号 ①②③、全角标点（，。：；！？（）「」《》、——……）、全角空格，全都属于东亚歧义宽度字符。
+`w:hint` 缺省是 `default`，此时 Word 拿 `w:ascii` 的字体 —— 于是它们跟着
+`run.font.name = 'Times New Roman'` 变成了西文字体。
+
+**python-docx 的 `run.font.name` 只写 `w:ascii` / `w:hAnsi`，根本不碰 `w:eastAsia` 和 `w:hint`**，
+所以「中文单独设宋体、英文设 Times New Roman」这套写法，对圈号和全角标点完全无效。
+
+**修法：改规则 md，不动一行 Swift 代码。** 版式是脚本的责任（§7），代码里没有任何字体逻辑。
+`Resources/作文批改规则.md` 改了三处：
+
+1. §0 总则那句「所有中文必须宋体」后面补括号：**圈号 ①②③ 和全角标点也算中文**。
+2. §3 排版表加一行「中文符号」，明确列出圈号、全角标点、全角空格，并点名 `w:hint`。
+3. 新增 **§3.1 圈号和全角标点必须算中文（最容易踩的坑）**，给可直接抄的代码：
+
+```python
+run.font.name = 'Times New Roman'          # 只写 w:ascii / w:hAnsi，管不到圈号
+rPr = run._element.get_or_add_rPr()
+rFonts = rPr.get_or_add_rFonts()
+rFonts.set(qn('w:eastAsia'), '宋体')
+rFonts.set(qn('w:hint'), 'eastAsia')       # ← 少了这一行，①②③ 和全角标点就变西文
+```
+
+**怎么验收**（不改文档本体，只解包看 XML）：
+
+```bash
+cd /tmp && rm -rf chk && mkdir chk && cd chk
+unzip -o -q "<成品.docx>"
+python3 - <<'EOF'
+import re, pathlib
+xml = pathlib.Path('word/document.xml').read_text(encoding='utf-8')
+bad = [m for m in re.findall(r'<w:rFonts[^>]*>', xml)
+       if 'w:eastAsia="宋体"' not in m or 'w:hint="eastAsia"' not in m]
+print(f"rFonts 总数 {len(re.findall(r'<w:rFonts', xml))}，不合格 {len(bad)}")
+for m in bad[:5]: print('  ', m)
+EOF
+```
+
+每个 `<w:rFonts>` 都要同时带 `w:eastAsia="宋体"` 和 `w:hint="eastAsia"`。
+
+**以后再遇到「某个符号字体不对」先查 `w:hint`，不要怀疑 AI 没设字体。**
+
+**版本**：未升版，**未推 GitHub**。
+
 ---
 
 ## 7. 产物版式与内容契约
