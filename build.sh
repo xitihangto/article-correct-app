@@ -56,7 +56,7 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 	<key>CFBundleIdentifier</key><string>com.workbuddy.essaycorrect</string>
 	<key>CFBundleExecutable</key><string>EssayCorrect</string>
 	<key>CFBundlePackageType</key><string>APPL</string>
-	<key>CFBundleShortVersionString</key><string>0.25</string>
+	<key>CFBundleShortVersionString</key><string>0.26</string>
 	<key>CFBundleVersion</key><string>25</string>
 	<key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
 	<key>CFBundleIconFile</key><string>AppIcon</string>
