@@ -93,8 +93,11 @@ echo "▸ 临时签名"
 xattr -cr "$APP" 2>/dev/null || true
 codesign --force --sign - --timestamp=none "$APP" || echo "  ⚠️ 签名失败（不影响本机运行，但 UserDefaults 域会变）"
 
-# 必须标记为 Bundle，否则 Finder 不显示图标
-SetFile -a B "$APP" 2>/dev/null || echo "  (SetFile 跳过)"
+# 这里**故意不设 bundle bit**（以前签名后会跑一句 `SetFile -a B`）。
+# 它写的是 com.apple.FinderInfo 扩展属性，只要属性在，签的时候就过不去，
+# `codesign --verify --strict` 也一直报 detritus。而且挪到签名前同样无效。
+# 其实不需要：`.app` 后缀本身就映射到 com.apple.application-bundle，
+# Finder 照样认包、照样显示图标。去掉后 strict 校验干净通过（2026-10-30）。
 
 echo "✓ 完成：$APP"
 du -sh "$APP"
@@ -111,9 +114,8 @@ if [ "${1:-}" = "--install" ] || [ "${2:-}" = "--install" ]; then
   fi
   cp -R "$APP" /Applications/
   ( rm -rf "$OLD" 2>/dev/null || true ) &
-  # cp -R 后安装副本的 Finder bundle 标记可能丢失（Finder 图标变通用图标，
-  # 但 Dock 仍能从 Info.plist 读到图标），所以在安装副本上再标一次并 touch
-  SetFile -a B "/Applications/高三英语作文批改.app" 2>/dev/null || echo "  (安装副本 SetFile 跳过)"
+  # 以前这里还有一句 `SetFile -a B` 补 bundle 标记，已删除（同签名处，2026-10-30）：
+  # .app 后缀足够，加了反而让 strict 校验报 detritus
   touch "/Applications/高三英语作文批改.app"
   echo "✓ 已安装：/Applications/高三英语作文批改.app"
   open "/Applications/高三英语作文批改.app"

@@ -1103,6 +1103,13 @@ CodeDirectory v=20400 flags=0x2(adhoc) hashes=145+3 location=embedded
 `~/Library/WebKit/com.workbuddy.essaycorrect`、`~/Library/Caches/com.workbuddy.essaycorrect`、
 `HTTPStorages/com.workbuddy.essaycorrect.binarycookies` 都还在，**登录态没丢**。
 
+> **2026-10-30 补：`SetFile -a B` 两处都已删掉，`--strict` 现在干净通过。**
+> 上面这版只是「签名前先清干净」，但签名之后那句 `SetFile -a B` 又把 FinderInfo 写了回去，
+> 于是 `codesign --verify --strict` 一直报 `detritus`（签名本身有效，不影响运行，只是校验不干净）。
+> 试卷识别版当时试过「把 SetFile 挪到签名之前」——**实测无效**，只要属性在就报。
+> 唯一解法是根本不设：`.app` 后缀本身就映射到 `com.apple.application-bundle`，Finder 照样认包、
+> 照样显示图标。现在签名段和安装段各删一句，`--strict` exit 0。
+
 **版本**：未升版（按 §5.6 版本纪律，日常改动沿用当前版本号，用户说发布才升）。
 本地已 `./build.sh --install`，**未推 GitHub**。
 
