@@ -252,6 +252,12 @@ DeepSeek 会检查 `event.isTrusted`，`dispatchEvent` / `element.click()` 造�
 > 所以**本地反复迭代期间沿用同一个版本号**（v0.15–v0.21 就是这么攒出来的，现在停在 **0.21**），别每改一次就 +1；
 > 到真要推 GitHub 那天再统一升一次、打 tag。**判断依据只有一个：用户说「推上去」才升版。**
 
+> **2026-10-30 加：升版必须连本地一起升到位。** 改完 `build.sh` 的版本号后，
+> 先 `./build.sh --install` 重编替换、quit 并重开 App，**再**打 tag 推。
+> 顺序反了就会出现「线上 0.26、本机还是 0.25」。另外 `--install` 里那句 `pkill` 在沙箱内
+> 会被静默拦掉（`2>/dev/null || true` 吃了报错），装完必须确认旧进程真的退出了，
+> 否则「磁盘上是新版、内存里跑的是旧版」，最难发现。
+
 > **2026-10-30 加：发版会自动同步到 R2。** `release.yml` 末尾有 `Mirror to R2` 一步，
 > 在 `Publish Release` 之后把 zip 再传一份到 Cloudflare R2（bucket `app-releases`），
 > 由 `gh-proxy.kexuejia.qzz.io` 从 CF 内部直出，不再跨境回源 GitHub。
