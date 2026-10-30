@@ -129,6 +129,57 @@ error: external macro implementation type 'SwiftUIMacros.StateMacro' could not b
 章节标题段前 8pt 段后 0、二级标题段前 6pt 段后 0、空段落 5 个（4 个章节交界 + 纠错｜补充意见之间）、
 题面英文行顶格。它不随包分发，只用于开发期验证。
 
+### 无人值守替跑（autopilot，2026-10-30 加）
+
+用户说「**替跑**」就是指这个：不选文件、不点按钮，让 App 自己跑完一轮，用于回归测试。
+源码 `Sources/Autopilot.swift`，入口在 `ContentView.onAppear` 里调 `Autopilot.start(state:)`。
+
+```bash
+# 首选：直接跑包内二进制。参数一定传得到，退出码同步返回
+"dist/高三英语作文批改.app/Contents/MacOS/EssayCorrect" \
+    --autopilot /绝对路径/题目.docx /绝对路径/作文.png --out /绝对路径/输出目录
+
+# 作文是多张图片就写成一个逗号串（上限 3 张）
+".../EssayCorrect" --autopilot 题目.docx "作文1.png,作文2.png" --out /tmp/run1
+```
+
+兜底方案（**唯一能「双击图标就替跑」的路子**，`open --args` 传不进去，见下）：
+
+```bash
+B=com.workbuddy.essaycorrect
+defaults write $B autopilotTopic -string "/绝对路径/题目.docx"
+defaults write $B autopilotEssay -string "/绝对路径/作文.png"
+defaults write $B autopilotOut   -string "/绝对路径/输出目录"
+killall EssayCorrect 2>/dev/null; open -a "高三英语作文批改"
+
+# 跑完必须清掉，否则下次打开 App 还会自动再跑一轮
+defaults delete $B autopilotTopic; defaults delete $B autopilotEssay; defaults delete $B autopilotOut
+```
+
+**行为**：查文件在不在 → 等 3 秒 → 填两个槽（`acceptBatch`，轮询到真的进框为止，最多 40 秒）
+→ **等「深度思考 + 联网搜索」双绿灯**（`modesChecked`，最多 60 秒）→ 跑 pipeline
+→ 复制成品和日志到输出目录 → 退出。
+
+**退出码**：`0` 成功 / `1` 生成失败 / `2` 超时（8 分钟）/ `3` 文件放不进上传框或文件不存在 / `4` 双绿灯未确认。
+
+**输出目录**里会有三样：成品 docx、`autopilot-日志.txt`（完整运行日志）、
+`_trace.txt`（关键节点时间戳 —— 命令行侧看不到 NSLog，靠它判断卡在哪一步）。
+
+**三个坑**：
+
+1. **`open -a … --args` 传不进去**。2026-10-30 加这个功能时实测：同一套参数，`open --args` 起来
+   连 `_trace.txt` 都不生成（等于 `configFromLaunch()` 拿到 nil），换成直接跑二进制立刻就对了。
+   原因跟 `--logdemo`（见 §6.21）是同一个：LaunchServices 起 App 时给不给 `CommandLine.arguments` 看心情。
+   **自动化脚本一律直接跑二进制。**
+2. `open -a` 会复用正在运行的实例，**改完代码必须 `killall EssayCorrect` 再启动**，否则跑的还是旧二进制。
+3. **上传框不查文件存在性**（只按扩展名收卡片），所以文件路径写错时，卡片照样进框，
+   要等 pipeline 跑到一半才报「未能打开文件」，退出码还是 1（看起来像生成失败）。
+   替跑在 `start()` 开头自己查一遍 `fileExists`，路径写错直接退出码 3 并写明是哪个文件 ——
+   这道检查只在替跑里，**不影响正常使用**（用户拖进来的文件本来就存在）。
+
+⚠️ 双绿灯必须等。界面按钮不强制（`canGenerate` 不含 `modesChecked`，怕开关认不出来时按钮永久变灰），
+但替跑没人看着，模式没确认就开跑，生成出来的批改稿质量会不一致。
+
 ### 界面状态演示（截图用）
 
 ```bash
@@ -172,6 +223,7 @@ article-correct-app/
 │   ├── BrowserController.swift # WKWebView + 隐形窗口 + 真实鼠标注入
 │   ├── PythonRunner.swift      # 内置 Python 执行器
 │   ├── ScriptExtractor.swift   # 从文本里提取/打分挑出 Python 代码块
+│   ├── Autopilot.swift         # 无人值守替跑，用法见 §3
 │   └── SafariBridge.swift      # AppleScript 通道（备用）
 ├── Resources/
 │   ├── 作文批改规则.md          # 网页版内嵌规则（五部分结构 + 版式 + 禁止项）
