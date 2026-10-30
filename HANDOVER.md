@@ -1411,15 +1411,9 @@ if AppState.autoOpenLogWhileTesting { state.openLog() }
 
 ### ⏳ 待推送（2026-10-30 起攒的，推完即删）
 
-- **推之前先核对提交者身份**（2026-10-30 发现的隐患）。这台机器**全局没配** `user.name` / `user.email`，
-  本仓库单独配了 `xitihangto <xitihangto@gmail.com>`。哪天新建仓库忘了配，commit 作者会被自动猜成
-  `linquin@linquins-Mac-mini.local` —— 已经在 `ocr-exam-app` 踩过一次（没推，`--amend --reset-author` 救回来了）。
-  **一旦推上去就改不回来了。** 推送前跑一遍 `git log -1 --format='%an <%ae>'` 核对；顺手把全局也配上：
-  ```bash
-  git config --global user.name  "xitihangto"
-  git config --global user.email "xitihangto@gmail.com"
-  ```
-- 待推内容：`fdb57c0` 无人值守替跑（autopilot）。**版本号仍是 0.26，推之前按发版五步升到位。**
+- 待推内容：`fdb57c0` 无人值守替跑（autopilot）；`ca13270` 本文件补待推送一节。
+  **版本号仍是 0.26，推之前按发版五步升到位。**
+  （本仓库的提交者身份一直是配好的 `xitihangto <xitihangto@gmail.com>`，不涉及这个问题。）
 
 1. ~~图标~~ **已完成（2026-10-26，v0.14）**。用户自己在别的模型出图，本工程只负责加工：
    `tools/make_icon.py`（AI 图 → 1024 RGBA 苹果 squircle + 投影）→ `tools/make_icns.py`（十档尺寸 → icns）。
